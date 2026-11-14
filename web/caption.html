@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pagekeeper text</title>
+<style>
+/* The borderless, always-on-top text window (Windows app). Drag it anywhere; colors come from the app. */
+:root{color-scheme:dark;--fg:#E8E6E1;--bg:#111318;--size:22px}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden;cursor:grab;user-select:none;-webkit-user-select:none}
+body:active{cursor:grabbing}
+#t{box-sizing:border-box;height:100%;overflow:auto;padding:12px 18px;font:var(--size)/1.45 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;white-space:pre-wrap;scrollbar-width:none}
+#t::-webkit-scrollbar{display:none}
+#t.speaking{display:flex;align-items:center}
+#t.speaking > div{width:100%}
+mark{background:color-mix(in srgb,var(--fg) 28%,transparent);color:inherit;border-radius:4px;padding:0 2px}
+.hint{opacity:.55;font-family:system-ui,"Segoe UI",sans-serif;font-size:14px}
+</style>
+</head>
+<body data-tauri-drag-region>
+<div id="t" data-tauri-drag-region><div class="hint" data-tauri-drag-region>Open a book in Pagekeeper.</div></div>
+<script>
+(() => {
+  const T = window.__TAURI__;
+  const box = document.getElementById("t");
+  const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  function show(p){
+    const r = document.documentElement.style;
+    r.setProperty("--fg", p.fg); r.setProperty("--bg", p.bg); r.setProperty("--size", p.size + "px");
+    box.classList.toggle("speaking", !!p.speaking);
+    let html;
+    if (!p.text) html = `<div class="hint" data-tauri-drag-region>${esc(p.hint || "Open a book in Pagekeeper.")}</div>`;
+    else if (p.word) {
+      const [s, n] = p.word;
+      html = `<div data-tauri-drag-region>${esc(p.text.slice(0, s))}<mark data-tauri-drag-region>${esc(p.text.slice(s, s + n))}</mark>${esc(p.text.slice(s + n))}</div>`;
+    } else html = `<div data-tauri-drag-region>${esc(p.text)}</div>`;
+    box.innerHTML = html;
+    const m = box.querySelector("mark"); if (m) m.scrollIntoView({ block: "center" });
+    else if (!p.speaking) box.scrollTop = 0;
+  }
+  if (T && T.event) {
+    T.event.listen("pk-caption", e => show(e.payload));
+    T.event.emitTo("main", "pk-caption-ready", null).catch(() => {});
+    addEventListener("beforeunload", () => { T.event.emitTo("main", "pk-caption-closed", null).catch(() => {}); });
+  }
+})();
+</script>
+</body>
+</html>

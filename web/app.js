@@ -911,6 +911,7 @@ function renderCatalog(el){
       : !d.entries.length ? `<p class="note">${lv ? "Search for a book to find its free audiobook." : "Nothing here."}</p>`
       : d.entries.map((x, i) => entryHTML(x, i, lv)).join("")}
     </div>
+    ${(lv || d.repo.id === "gutenberg") && d.q && !d.loading ? `<p class="note" style="max-width:65ch;margin:14px 0">${lv ? "LibriVox" : "Project Gutenberg"} only has books whose copyright has expired, mostly published before 1930. Newer books like <i>Dune</i> won't be here. For those, try your public library's free Libby app, or buy a DRM-free copy and tap Add book.</p>` : ""}
     ${d.next && !d.error ? `<button class="btn" id="dMore" ${d.loading ? "disabled" : ""}>${d.loading ? "Loading…" : "More"}</button>` : ""}`;
   $("#dBack").onclick = () => { if (d.stack.length > 1) { d.stack.pop(); d.searchMode = false; loadFeed(); } else { S.disc = null; rerenderFind(); } };
   const form = $("#dSearch");
@@ -1003,6 +1004,7 @@ async function openBook(id){
 function closeReader(){
   saveAudioPos(true); stopReadAloud();
   S.view = "library"; S.cur = null; render(); syncNow();
+  if (TAURI) capSend(); else { const f = $("#floatcap"); if (f) f.remove(); }
 }
 function renderReader(){
   const b = S.books[S.cur];
@@ -1057,7 +1059,9 @@ async function showPage(){
   S.page = Math.min(Math.max(1, S.page), T);
   if (c.kind === "text") {
     const blocks = c.pages[S.page - 1];
-    main.innerHTML = `<article class="page">${blocks.map(([t, x]) => t === "h" ? `<h2>${esc(x)}</h2>` : `<p>${esc(x)}</p>`).join("")}<div class="pno">${S.page}</div></article>`;
+    // Each sentence is its own span so read-aloud can highlight it.
+    const sentences = x => (x.match(/[^.!?…]+[.!?…]+["'”’)\]]*\s*|[^.!?…]+$/g) || [x]).map(s => `<span data-s>${esc(s)}</span>`).join("");
+    main.innerHTML = `<article class="page">${blocks.map(([t, x]) => t === "h" ? `<h2><span data-s>${esc(x)}</span></h2>` : `<p>${sentences(x)}</p>`).join("")}<div class="pno">${S.page}</div></article>`;
   } else {
     main.innerHTML = `<div class="pdfwrap"><canvas id="pdfc"></canvas></div>`;
     const pg = await c.pdf.getPage(S.page); if (id !== S.cur) return;
@@ -1069,6 +1073,7 @@ async function showPage(){
   }
   main.scrollTop = 0;
   updateReaderChrome();
+  if (!capNow.speaking) capSend();
 }
 function renderMissing(main, id, failed){
   const b = S.books[id], src = b.src || {};
@@ -1120,7 +1125,8 @@ document.addEventListener("keydown", e => {
   if (S.view !== "reader" || e.target.closest("input,select,textarea")) return;
   if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); goto(S.page + 1); }
   else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); goto(S.page - 1); }
-  else if (e.key === "Escape") { if (S.sheet) toggleSheet(S.sheet); else closeReader(); }
+  else if (e.key === " " && S.dock && !e.target.closest("button")) { e.preventDefault(); togglePlay(); }
+  else if (e.key === "Escape") { if (S.sheet) toggleSheet(S.sheet); else if (S.bigPlayer) { S.bigPlayer = false; updateDock(); } else closeReader(); }
 });
 function toggleSheet(name){ S.sheet = S.sheet === name ? null : name; renderSheet(); }
 function renderSheet(){
@@ -1143,7 +1149,33 @@ function renderSheet(){
     el.innerHTML = `<div class="sheet"><h3>Reading settings <button class="ib" data-close aria-label="Close">${ICON.close}</button></h3>
       <div class="field"><label>Paper</label><div class="seg">${[["paper","White"],["sepia","Sepia"],["night","Night"]].map(([k,l]) => `<button data-paper="${k}" aria-pressed="${paper === k}">${l}</button>`).join("")}</div></div>
       <div class="field"><label>Text size · ${fs}px</label><div class="seg"><button data-fs="-1" aria-label="Smaller text">A−</button><button data-fs="1" aria-label="Larger text">A+</button></div>
-        <span class="note">Page numbers don't change with text size, so they match your other devices.</span></div></div>`;
+        <span class="note">Page numbers don't change with text size, so they match your other devices.</span></div>
+      <div class="field"><label>Highlight while reading aloud</label><div class="seg">${[["sentence","Sentence"],["word","Word"],["off","Off"]].map(([k,l]) => `<button data-hl="${k}" aria-pressed="${(prefs.get("hl") || "sentence") === k}">${l}</button>`).join("")}</div>
+        <span class="note">Follows along when you use Read aloud on EPUB and text books. Audiobook files can't be matched to the text word by word.</span></div>
+      <div class="field"><label>Read-aloud speed · ${rateTxt(prefs.get("ttsRate") || 1)}</label><div class="seg">${[0.8, 1, 1.2, 1.5].map(r => `<button data-tts="${r}" aria-pressed="${(prefs.get("ttsRate") || 1) === r}">${rateTxt(r)}</button>`).join("")}</div></div></div>`;
+    const cap = capCfg(), capOn = !!prefs.get("capOn");
+    el.querySelector(".sheet").insertAdjacentHTML("beforeend", `
+      <div class="field"><label>Pop-out text</label>
+        <div class="seg"><button id="capToggle" aria-pressed="${capOn}">${capOn ? "Hide pop-out" : "Show pop-out"}</button></div>
+        <span class="note">${TAURI ? "A borderless window that stays on top of everything. Drag it anywhere; drag its edges to resize." : "A floating panel you can drag around. Drag its corner to resize."} It shows the sentence being read aloud, or the page you're on.</span></div>
+      <div class="field"><label>Pop-out colors</label>
+        <div class="capcolors">
+          <label class="cc">Text <input type="color" id="capFg" value="${esc(cap.fg)}"></label>
+          <label class="cc">Background <input type="color" id="capBg" value="${esc(cap.bg)}"></label>
+          <span class="cap-sample" style="color:${esc(cap.fg)};background:${esc(cap.bg)}">Sample text</span>
+        </div>
+        <div class="seg" style="margin-top:8px">
+          <button data-capsz="-1" aria-label="Smaller pop-out text">A−</button><button data-capsz="1" aria-label="Larger pop-out text">A+</button>
+          <button id="capReset">Reset to dark</button>
+        </div></div>`);
+    $("#capToggle").onclick = () => { setCaption(!prefs.get("capOn")); renderSheet(); };
+    const colorChange = () => { prefs.set("capFg", $("#capFg").value); prefs.set("capBg", $("#capBg").value);
+      const s = el.querySelector(".cap-sample"); s.style.color = $("#capFg").value; s.style.background = $("#capBg").value; capSend(); };
+    $("#capFg").oninput = colorChange; $("#capBg").oninput = colorChange;
+    el.querySelectorAll("[data-capsz]").forEach(b => b.onclick = () => { prefs.set("capSize", Math.min(48, Math.max(12, capCfg().size + 2 * +b.dataset.capsz))); capSend(); });
+    $("#capReset").onclick = () => { prefs.set("capFg", undefined); prefs.set("capBg", undefined); prefs.set("capSize", undefined); capSend(); renderSheet(); };
+    el.querySelectorAll("[data-hl]").forEach(b => b.onclick = () => { prefs.set("hl", b.dataset.hl); if (b.dataset.hl === "off") clearHighlights(); renderSheet(); });
+    el.querySelectorAll("[data-tts]").forEach(b => b.onclick = () => { prefs.set("ttsRate", +b.dataset.tts); renderSheet(); });
     el.querySelectorAll("[data-paper]").forEach(b => b.onclick = () => { prefs.set("paper", b.dataset.paper); $(".reader").dataset.paper = b.dataset.paper; renderSheet(); });
     el.querySelectorAll("[data-fs]").forEach(b => b.onclick = () => { const v = Math.min(30, Math.max(14, prefs.get("fs") + 2 * +b.dataset.fs)); prefs.set("fs", v); $(".reader").style.setProperty("--fs", v + "px"); renderSheet(); });
   }
@@ -1248,7 +1280,7 @@ async function loadTrack(i, seek){
     return false;
   }
   auBook = { id: S.cur, track: i };
-  au.src = src; au.playbackRate = prefs.get("rate") || 1;
+  au.src = src; au.defaultPlaybackRate = prefs.get("rate") || 1; au.playbackRate = prefs.get("rate") || 1;
   if (seek) { await new Promise(r => { au.addEventListener("loadedmetadata", r, { once: true }); au.addEventListener("error", r, { once: true }); }); try { au.currentTime = seek; } catch {} }
   setMediaSession();
   return true;
@@ -1260,8 +1292,13 @@ function setMediaSession(){
     navigator.mediaSession.metadata = new MediaMetadata({ title: t.name, artist: b.author || "", album: b.title, artwork: b.cover ? [{ src: b.cover, sizes: "200x300", type: "image/jpeg" }] : [] });
     navigator.mediaSession.setActionHandler("play", () => au.play());
     navigator.mediaSession.setActionHandler("pause", () => au.pause());
-    navigator.mediaSession.setActionHandler("seekbackward", () => { au.currentTime = Math.max(0, au.currentTime - 30); });
-    navigator.mediaSession.setActionHandler("seekforward", () => { au.currentTime = Math.min(au.duration || 0, au.currentTime + 30); });
+    navigator.mediaSession.setActionHandler("seekbackward", () => skipBy(-skipSec()));
+    navigator.mediaSession.setActionHandler("seekforward", () => skipBy(skipSec()));
+  } catch {}
+  try {
+    navigator.mediaSession.setActionHandler("previoustrack", () => goPart(-1));
+    navigator.mediaSession.setActionHandler("nexttrack", () => goPart(1));
+    navigator.mediaSession.setActionHandler("seekto", d => { if (d && isFinite(d.seekTime)) { au.currentTime = d.seekTime; saveAudioPos(true); updateTimes(); } });
   } catch {}
 }
 async function togglePlay(){
@@ -1278,7 +1315,8 @@ function saveAudioPos(force){
   auSaveAt = now;
   save(auBook.id, { audio: { track: auBook.track, time: t } });
 }
-au.addEventListener("timeupdate", () => { saveAudioPos(false); const s = $("#auSeek"); if (s && !s.matches(":active")) { s.max = au.duration || 0; s.value = au.currentTime; } const tm = $("#auTime"); if (tm) tm.textContent = `${fmt(au.currentTime)} / ${fmt(au.duration)}`; });
+au.addEventListener("timeupdate", () => { saveAudioPos(false); updateTimes(); });
+au.addEventListener("loadedmetadata", () => updateTimes());
 au.addEventListener("play", updateDock); au.addEventListener("pause", () => { saveAudioPos(true); updateDock(); });
 au.addEventListener("ended", async () => {
   const b = auBook && S.books[auBook.id]; if (!b) return;
@@ -1313,35 +1351,158 @@ async function readAloud(){
   if (!au.paused) au.pause();
   S.reading = true; updateDock();
   while (S.reading && S.view === "reader") {
-    const txt = await pageText();
-    try { if (txt) await speak(txt); } catch { break; }
+    try { await speakPage(); } catch { break; }
     if (!S.reading) break;
     if (S.page >= total()) break;
     await goto(S.page + 1);
   }
-  S.reading = false; updateDock();
+  S.reading = false; capNow.speaking = false; capSend(); updateDock();
 }
-function stopReadAloud(){ if (S.reading) { S.reading = false; try { synth && synth.cancel(); } catch {} updateDock(); } }
+function stopReadAloud(){ if (S.reading) { S.reading = false; try { synth && synth.cancel(); } catch {} clearHighlights(); capNow.speaking = false; capSend(); updateDock(); } }
+
+/* Speak the page sentence by sentence, highlighting as it goes (setting: sentence, word or off). */
+function clearHighlight(el){
+  el.classList.remove("hl", "soft");
+  if (el.dataset.w) { el.textContent = el.dataset.t; delete el.dataset.w; }
+}
+function clearHighlights(){ document.querySelectorAll(".page [data-s]").forEach(clearHighlight); }
+function speakPage(){
+  const spans = [...document.querySelectorAll(".page [data-s]")];
+  if (!spans.length) return pageText().then(t => t ? speak(t) : null);   // PDFs: read without highlighting
+  return new Promise((res, rej) => {
+    const mode = prefs.get("hl") || "sentence";
+    let i = 0, prev = null;
+    const next = () => {
+      if (prev) clearHighlight(prev);
+      if (!S.reading) return rej(new Error("stopped"));
+      if (i >= spans.length) return res();
+      const el = spans[i++]; prev = el;
+      const text = el.textContent; el.dataset.t = text;
+      if (!text.trim()) return next();
+      if (mode !== "off") {
+        el.classList.add("hl"); if (mode === "word") el.classList.add("soft");
+        el.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      }
+      const lead = text.length - text.trimStart().length;
+      capNow.speaking = true; capNow.text = text.trim(); capNow.word = null; capSend();
+      const u = new SpeechSynthesisUtterance(text.trim());
+      u.rate = prefs.get("ttsRate") || 1;
+      u.onboundary = ev => {
+        if (ev.name && ev.name !== "word") return;
+        const start = ev.charIndex + lead;
+        let len = ev.charLength || 0;
+        if (!len) { const m = text.slice(start).match(/^[^\s]+/); len = m ? m[0].length : 0; }
+        if (!len) return;
+        capNow.word = [ev.charIndex, len]; capSend();
+        if (mode !== "word") return;
+        el.dataset.w = "1";
+        el.innerHTML = esc(text.slice(0, start)) + `<mark class="w">${esc(text.slice(start, start + len))}</mark>` + esc(text.slice(start + len));
+      };
+      u.onend = next;
+      u.onerror = e => (e.error === "interrupted" || e.error === "canceled") ? (clearHighlight(el), rej(new Error("stopped"))) : next();
+      synth.speak(u);
+    };
+    next();
+  });
+}
+
+/* ---------- audio player (Libby-style: scrubber, skip, speed, volume) ---------- */
+Object.assign(ICON, {
+  up:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>',
+  downChev:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
+  prev:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>',
+  nextp:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>',
+  vol:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM15.5 8.5a5 5 0 010 7M19 5a10 10 0 010 14"/></svg>',
+  mute:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM23 9l-6 6M17 9l6 6"/></svg>'
+});
+const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+const SKIPS = [10, 15, 30, 60];
+const skipSec = () => prefs.get("skip") || 15;
+const curRate = () => prefs.get("rate") || 1;
+const rateTxt = r => (+(+r).toFixed(2)) + "×";
+const curTi = b => auBook && auBook.id === S.cur ? auBook.track : ((b && b.audio && b.audio.track) || 0);
+try { au.preservesPitch = true; au.webkitPreservesPitch = true; } catch {}
+
+function setRate(r){
+  r = Math.min(3, Math.max(0.5, Math.round(r * 20) / 20));
+  prefs.set("rate", r); au.defaultPlaybackRate = r; au.playbackRate = r;
+  document.querySelectorAll("[data-rate-label]").forEach(x => { x.textContent = rateTxt(r); });
+  document.querySelectorAll("[data-rate]").forEach(x => x.setAttribute("aria-pressed", String(+x.dataset.rate === r)));
+  updateTimes();
+}
+async function ensureLoaded(){
+  const b = S.books[S.cur]; if (!b || !(b.audio && b.audio.tracks && b.audio.tracks.length)) return false;
+  if (auBook && auBook.id === S.cur) return true;
+  return loadTrack(curTi(b), b.audio.time || 0);
+}
+async function skipBy(sec){
+  if (!(await ensureLoaded())) return;
+  const end = isFinite(au.duration) ? au.duration - 0.5 : Infinity;
+  au.currentTime = Math.max(0, Math.min(end, au.currentTime + sec));
+  saveAudioPos(true); updateTimes();
+}
+async function goPart(delta){
+  const b = S.books[S.cur]; if (!b) return; const tracks = b.audio.tracks || [];
+  if (delta < 0 && auBook && auBook.id === S.cur && au.currentTime > 5) { au.currentTime = 0; saveAudioPos(true); updateTimes(); return; }
+  const n = curTi(b) + delta; if (n < 0 || n >= tracks.length) return;
+  const was = !au.paused;
+  if (await loadTrack(n, 0)) { save(S.cur, { audio: { track: n, time: 0 } }); if (was) au.play().catch(() => {}); }
+  updateDock();
+}
+function paintRange(s){ const max = +s.max || 0; s.style.setProperty("--p", (max > 0 ? Math.min(100, (+s.value / max) * 100) : 0) + "%"); }
+function updateTimes(){
+  if (S.scrubbing) return;
+  const b = S.books[S.cur]; if (!b) return;
+  const own = auBook && auBook.id === S.cur;
+  const cur = own ? au.currentTime : ((b.audio && b.audio.time) || 0);
+  const dur = own ? au.duration : NaN;
+  const s = $("#auSeek");
+  if (s) { s.max = isFinite(dur) ? Math.floor(dur) : Math.max(1, Math.ceil(cur)); s.value = Math.floor(cur); paintRange(s); }
+  const c = $("#auCur"); if (c) c.textContent = fmt(cur);
+  const l = $("#auLeft"); if (l) l.textContent = isFinite(dur) ? "-" + fmt(Math.max(0, dur - cur)) : "–:––";
+  const sp = $("#auLeftSpeed");
+  if (sp) sp.textContent = isFinite(dur) && curRate() !== 1 ? `${fmt(Math.max(0, dur - cur) / curRate())} left at ${rateTxt(curRate())}` : "";
+}
+
+/* Volume: the audio element on PC; the phone's own media volume on iPhone (iOS ignores page volume). */
+let vol = IOS ? null : (prefs.get("vol") ?? 1), lastVol = 0.7;
+if (!IOS) au.volume = vol;
+window.pkVolume = v => { vol = +v; paintVol(); };
+function paintVol(){
+  const s = $("#auVol");
+  if (s && vol != null && !s.matches(":active")) { s.value = vol; paintRange(s); }
+  const m = $("#auMute"); if (m) { m.innerHTML = vol === 0 ? ICON.mute : ICON.vol; m.setAttribute("aria-label", vol === 0 ? "Unmute" : "Mute"); }
+}
+function setVol(v){
+  v = Math.min(1, Math.max(0, v)); vol = v;
+  if (IOS) Native.call({ op: "volume", value: v }).catch(() => {});
+  else { au.volume = v; prefs.set("vol", v); }
+  paintVol();
+}
 
 function updateDock(){
   const el = $("#dock"); if (!el) return;
   if (!S.dock) { el.innerHTML = ""; return; }
-  const b = S.books[S.cur]; const tracks = b.audio?.tracks || [];
-  const playing = !au.paused && auBook && auBook.id === S.cur;
+  const b = S.books[S.cur]; const tracks = (b.audio && b.audio.tracks) || [];
+  const own = auBook && auBook.id === S.cur;
+  const playing = own && !au.paused;
   const ttsBtn = synth ? `<button class="btn" id="tts">${ICON.speak} ${S.reading ? "Stop reading" : "Read aloud"}</button>` : "";
   if (!tracks.length) {
     el.innerHTML = `<div class="dock"><div class="row1" style="flex-wrap:wrap;gap:10px">
-      <div class="trk" style="min-width:200px"><b>No audiobook yet</b><span>Add MP3, M4A or M4B files, or a LibriVox zip.</span></div>
+      <div class="trk" style="min-width:200px"><b>No audiobook yet</b><span>Add MP3, M4A or M4B files or a LibriVox zip, or get one in Discover.</span></div>
       <button class="btn primary" id="auAdd">${ICON.plus} Add audio</button>${ttsBtn}</div></div>`;
   } else {
     if (tracks.some(x => S.haveLocal[x.key] === undefined)) checkLocal(S.cur).then(() => S.dock && updateDock());
-    const ti = auBook && auBook.id === S.cur ? auBook.track : (b.audio.track || 0);
-    const t = tracks[ti] || tracks[0];
-    const st = auBook && auBook.id === S.cur ? au.currentTime : (b.audio.time || 0);
-    const rate = prefs.get("rate") || 1;
+    const ti = curTi(b); const t = tracks[ti] || tracks[0];
+    const rate = curRate(), sk = skipSec(), big = !!S.bigPlayer;
+    // Load the current part (paused) so the scrubber knows its length.
+    if (!own && S.haveLocal[t.key] && (au.paused || !auBook) && !S.preloading) {
+      S.preloading = true;
+      loadTrack(ti, (b.audio && b.audio.time) || 0).finally(() => { S.preloading = false; updateTimes(); });
+    }
     const away = notHere(S.cur);
     const cloudOnly = away.filter(x => x.asset), gone = away.filter(x => !x.asset);
-    const aurl = b.audio?.url;
+    const aurl = b.audio && b.audio.url;
     let note = "";
     if (gone.length) note += `<div class="missbox"><span><b>${gone.length} of ${tracks.length} part${tracks.length > 1 ? "s" : ""} aren't on this device</b> (${esc(fmtSize(gone.reduce((n, x) => n + (x.size || 0), 0)))}). Download the exact same files, then add them here. Your listening spot is kept.</span>
         <span style="color:var(--pmuted);word-break:break-all">${gone.slice(0, 4).map(x => esc(x.file || x.name) + " · " + esc(fmtSize(x.size))).join("<br>")}${gone.length > 4 ? `<br>…and ${gone.length - 4} more` : ""}</span>
@@ -1350,39 +1511,162 @@ function updateDock(){
           <button class="btn ${aurl ? "" : "primary"}" id="auMatch">${aurl ? "2. " : ""}Add matching files</button></div></div>`;
     if (cloudOnly.length) note += `<div class="missbox"><span>${cloudOnly.length} part${cloudOnly.length > 1 ? "s are" : " is"} in your account but not downloaded here (${esc(fmtSize(cloudOnly.reduce((n, x) => n + (x.size || 0), 0)))}).</span>
         <div><button class="btn" id="auDl">${ICON.down} Download for offline</button></div></div>`;
-    el.innerHTML = `<div class="dock">${note}
-      <div class="row1">
-        <button class="ib" id="auBack" aria-label="Back 30 seconds">${ICON.rw}</button>
-        <button class="play" id="auPlay" aria-label="${playing ? "Pause" : "Play"}">${playing ? ICON.pause : ICON.play}</button>
-        <button class="ib" id="auFwd" aria-label="Forward 30 seconds">${ICON.ff}</button>
-        <div class="trk"><b>${esc(t.name)}</b><span id="auTime">${fmt(st)} / ${fmt(auBook && auBook.id === S.cur ? au.duration : NaN)}</span>${tracks.length > 1 ? `<span> · part ${ti + 1} of ${tracks.length}</span>` : ""}</div>
-        <select id="auRate" aria-label="Playback speed">${[0.75,1,1.25,1.5,1.75,2].map(r => `<option value="${r}" ${r === rate ? "selected" : ""}>${r}×</option>`).join("")}</select>
-        <button class="ib" id="auList" aria-label="Tracks" aria-pressed="${!!S.showTracks}">${ICON.list}</button>
-      </div>
-      <input type="range" id="auSeek" min="0" max="${au.duration || 0}" step="1" value="${st}" aria-label="Position">
-      ${S.showTracks ? `<ul class="tracks">${tracks.map((x, i) => `<li><button data-t="${i}" class="${i === ti ? "cur" : ""}"><span>${i + 1}. ${esc(x.name)}</span><span class="where">${S.haveLocal[x.key] ? "on this device" : x.asset ? "in your account" : S.haveLocal[x.key] === false ? "not on this device" : ""}</span></button></li>`).join("")}</ul>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn" id="auAdd">${ICON.plus} Add more</button>${ttsBtn}${aurl || tracks.some(x => x.size > MAX_FILE) ? `<button class="btn" id="auLink2">${aurl ? "Change" : "Add"} download link</button>` : ""}<button class="btn danger" id="auClear">Remove audio</button></div>` : ""}
-    </div>`;
+
+    const scrub = `<input type="range" class="scrub" id="auSeek" min="0" max="1" step="1" value="0" aria-label="Position in this part">
+      <div class="pl-time"><span id="auCur">0:00</span><span id="auLeftSpeed"></span><span id="auLeft">–:––</span></div>`;
+    const skipBtn = dir => `<button class="ib skipbtn" id="${dir < 0 ? "auBack" : "auFwd"}" aria-label="${dir < 0 ? "Back" : "Forward"} ${sk} seconds">${dir < 0 ? ICON.rw : ICON.ff}<span>${sk}</span></button>`;
+    const playBtn = `<button class="play" id="auPlay" aria-label="${playing ? "Pause" : "Play"}">${playing ? ICON.pause : ICON.play}</button>`;
+
+    if (!big) {
+      el.innerHTML = `<div class="dock">${note}
+        <div class="row1">
+          ${skipBtn(-1)}${playBtn}${skipBtn(1)}
+          <div class="trk"><b>${esc(t.name)}</b><span>${tracks.length > 1 ? `Part ${ti + 1} of ${tracks.length}` : esc(b.title)}</span></div>
+          <button class="chip" id="auRateBtn" aria-label="Playback speed, tap to change"><span data-rate-label>${rateTxt(rate)}</span></button>
+          <button class="ib" id="auExpand" aria-label="Open the full player">${ICON.up}</button>
+        </div>${scrub}</div>`;
+    } else {
+      const list = S.showTracks ? `<ul class="tracks">${tracks.map((x, i) => `<li><button data-t="${i}" class="${i === ti ? "cur" : ""}"><span>${i + 1}. ${esc(x.name)}</span><span class="where">${S.haveLocal[x.key] ? "on this device" : x.asset ? "in your account" : S.haveLocal[x.key] === false ? "not on this device" : ""}</span></button></li>`).join("")}</ul>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn" id="auAdd">${ICON.plus} Add more</button>${ttsBtn}${aurl || tracks.some(x => x.size > MAX_FILE) ? `<button class="btn" id="auLink2">${aurl ? "Change" : "Add"} download link</button>` : ""}<button class="btn danger" id="auClear">Remove audio</button></div>` : "";
+      el.innerHTML = `<div class="dock big">
+        <div class="pl-head"><button class="ib" id="auExpand" aria-label="Close the full player">${ICON.downChev}</button><span>Now playing</span><span class="pl-spacer"></span></div>
+        ${note}
+        <div class="pl-top">${coverHTML(b).replace('class="cover"', 'class="cover pl-cover"')}
+          <div class="trk"><b>${esc(t.name)}</b><span>${esc(b.title)}${tracks.length > 1 ? ` · part ${ti + 1} of ${tracks.length}` : ""}</span></div></div>
+        ${scrub}
+        <div class="pl-ctrls">
+          <button class="ib" id="auPrev" aria-label="Previous part or start of this part">${ICON.prev}</button>
+          ${skipBtn(-1)}${playBtn}${skipBtn(1)}
+          <button class="ib" id="auNext" aria-label="Next part" ${ti < tracks.length - 1 ? "" : "disabled"}>${ICON.nextp}</button>
+        </div>
+        <div class="pl-row"><label>Speed</label>
+          <div class="ratebox"><button class="ib" id="auSlower" aria-label="Slower">−</button><b data-rate-label>${rateTxt(rate)}</b><button class="ib" id="auFaster" aria-label="Faster">+</button></div>
+          <div class="chips">${SPEEDS.map(r => `<button class="chip" data-rate="${r}" aria-pressed="${r === rate}">${rateTxt(r)}</button>`).join("")}</div></div>
+        <div class="pl-row"><label>Volume</label><button class="ib" id="auMute" aria-label="Mute">${ICON.vol}</button>
+          <input type="range" class="scrub vol" id="auVol" min="0" max="1" step="0.01" value="${vol == null ? 1 : vol}" aria-label="Volume"></div>
+        <div class="pl-row"><label>Skip</label><div class="chips">${SKIPS.map(s => `<button class="chip" data-skip="${s}" aria-pressed="${s === sk}">${s} sec</button>`).join("")}</div></div>
+        <div class="pl-row"><label>Parts</label><button class="btn" id="auList">${S.showTracks ? "Hide parts" : `Show all ${tracks.length}`}</button></div>
+        ${list}
+      </div>`;
+    }
+
     $("#auPlay").onclick = togglePlay;
-    $("#auBack").onclick = () => { au.currentTime = Math.max(0, au.currentTime - 30); };
-    $("#auFwd").onclick = () => { au.currentTime = Math.min(au.duration || 0, au.currentTime + 30); };
-    $("#auSeek").onchange = e => { if (auBook && auBook.id === S.cur) { au.currentTime = +e.target.value; saveAudioPos(true); } };
-    $("#auRate").onchange = e => { prefs.set("rate", +e.target.value); au.playbackRate = +e.target.value; };
-    $("#auList").onclick = () => { S.showTracks = !S.showTracks; updateDock(); };
+    $("#auBack").onclick = () => skipBy(-sk);
+    $("#auFwd").onclick = () => skipBy(sk);
+    $("#auExpand").onclick = () => { S.bigPlayer = !S.bigPlayer; updateDock(); };
+    const seek = $("#auSeek");
+    seek.oninput = () => {
+      S.scrubbing = true; paintRange(seek);
+      $("#auCur").textContent = fmt(+seek.value);
+      if (auBook && auBook.id === S.cur && isFinite(au.duration)) $("#auLeft").textContent = "-" + fmt(Math.max(0, au.duration - seek.value));
+    };
+    seek.onchange = async () => {
+      const v = +seek.value; S.scrubbing = false;
+      if (!(await ensureLoaded())) return;
+      au.currentTime = v; saveAudioPos(true); updateTimes();
+    };
+    const rb = $("#auRateBtn"); if (rb) rb.onclick = () => { const i = SPEEDS.indexOf(curRate()); setRate(SPEEDS[(i + 1) % SPEEDS.length]); };
+    const sl = $("#auSlower"); if (sl) sl.onclick = () => setRate(curRate() - 0.05);
+    const fa = $("#auFaster"); if (fa) fa.onclick = () => setRate(curRate() + 0.05);
+    el.querySelectorAll("[data-rate]").forEach(x => x.onclick = () => setRate(+x.dataset.rate));
+    el.querySelectorAll("[data-skip]").forEach(x => x.onclick = () => { prefs.set("skip", +x.dataset.skip); updateDock(); });
+    const pv = $("#auPrev"); if (pv) pv.onclick = () => goPart(-1);
+    const nx = $("#auNext"); if (nx) nx.onclick = () => goPart(1);
+    const vs = $("#auVol"); if (vs) { vs.oninput = () => { paintRange(vs); setVol(+vs.value); }; }
+    const mu = $("#auMute"); if (mu) mu.onclick = () => { if (vol > 0) { lastVol = vol; setVol(0); } else setVol(lastVol || 0.7); };
+    if (big && IOS && vol == null) Native.call({ op: "volumeGet" }).then(v => { vol = +v; paintVol(); }).catch(() => {});
+    const ls = $("#auList"); if (ls) ls.onclick = () => { S.showTracks = !S.showTracks; updateDock(); };
     const am = $("#auMatch"); if (am) am.onclick = () => $("#matchFile").click();
     el.querySelectorAll("[data-await-audio]").forEach(a => a.addEventListener("click", () => { S.awaitingAudio = S.cur; }));
     const dl = $("#auDl"); if (dl) dl.onclick = downloadAll;
     ["#auLink", "#auLink2"].forEach(s => { const x = $(s); if (x) x.onclick = () => askAudioLink(S.cur); });
-    el.querySelectorAll("[data-t]").forEach(x => x.onclick = async () => { const i = +x.dataset.t; if (await loadTrack(i, 0)) { save(S.cur, { audio: { track: i, time: 0 } }); au.play().catch(() => {}); } });
+    el.querySelectorAll("[data-t]").forEach(x => x.onclick = async () => { const i = +x.dataset.t; if (await loadTrack(i, 0)) { save(S.cur, { audio: { track: i, time: 0 } }); au.play().catch(() => {}); } updateDock(); });
     const clr = $("#auClear"); if (clr) clr.onclick = () => confirmBox("Remove the audiobook?", "The audio files for this book will be removed from every device. The book itself stays.", "Remove audio", async () => {
       au.pause(); au.removeAttribute("src"); auBook = null;
       const id = S.cur; S.uploads = S.uploads.filter(u => !(u.id === id && u.kind === "track"));
       for (const x of tracks) { idb.del(x.key); if (x.asset && Cloud.signedIn()) Files.del(x.asset).catch(() => {}); }
       save(id, { audio: { tracks: [], track: 0, time: 0, url: "" } }, { now: true }); S.showTracks = false; updateDock();
     });
+    updateTimes(); paintVol();
   }
   const add = $("#auAdd"); if (add) add.onclick = () => $("#audioFile").click();
   const tb = $("#tts"); if (tb) tb.onclick = readAloud;
+}
+
+/* ---------- pop-out text ----------
+   Windows app: a borderless, always-on-top window you drag anywhere on screen.
+   iPhone and browser: a borderless panel you drag around inside Pagekeeper.
+   Shows the sentence being read aloud (with the word, in Word mode), otherwise the page you're on. */
+const CAP_DEFAULT = { fg: "#E8E6E1", bg: "#111318", size: 22 };
+const capCfg = () => ({ fg: prefs.get("capFg") || CAP_DEFAULT.fg, bg: prefs.get("capBg") || CAP_DEFAULT.bg, size: prefs.get("capSize") || CAP_DEFAULT.size });
+const capNow = { speaking: false, text: "", word: null };
+function capPayload(){
+  let text = "", hint = "";
+  if (capNow.speaking) text = capNow.text;
+  else if (S.view === "reader" && S.cur) {
+    const c = S.content[S.cur];
+    if (c && c.kind === "text") text = c.pages[S.page - 1].map(b => b[1]).join("\n\n");
+    else if (c && c.kind === "pdf") hint = "Pop-out text works with EPUB and text books, or while a PDF is read aloud.";
+  } else hint = "Open a book in Pagekeeper.";
+  return { ...capCfg(), text, hint, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking };
+}
+function capSend(){
+  if (!prefs.get("capOn")) return;
+  const p = capPayload();
+  if (TAURI) TAURI.event.emitTo("caption", "pk-caption", p).catch(() => {});
+  else renderFloatCap(p);
+}
+function setCaption(on){
+  prefs.set("capOn", !!on);
+  if (TAURI) TAURI.core.invoke("pk_caption", { show: !!on }).catch(e => toast("Couldn't open the pop-out: " + esc(String(e))));
+  else if (!on) { const f = $("#floatcap"); if (f) f.remove(); }
+  capSend();
+}
+if (TAURI && TAURI.event) {
+  TAURI.event.listen("pk-caption-ready", () => capSend());
+  TAURI.event.listen("pk-caption-closed", () => { if (prefs.get("capOn")) { prefs.set("capOn", false); if (S.sheet === "type") renderSheet(); } });
+}
+/* In-app floating panel (iPhone and browser). */
+function renderFloatCap(p){
+  let f = $("#floatcap");
+  if (!f) {
+    f = document.createElement("div"); f.id = "floatcap"; f.setAttribute("role", "status"); f.setAttribute("aria-live", "polite");
+    const pos = prefs.get("capPos") || { x: 16, y: 90 };
+    f.style.left = pos.x + "px"; f.style.top = pos.y + "px";
+    const sz = prefs.get("capBox"); if (sz) { f.style.width = sz.w + "px"; f.style.height = sz.h + "px"; }
+    f.innerHTML = `<div class="fc-text"></div><span class="fc-grip" aria-hidden="true"></span>`;
+    document.body.append(f);
+    // drag anywhere on the panel; drag the corner to resize
+    let drag = null;
+    f.addEventListener("pointerdown", e => {
+      const r = f.getBoundingClientRect();
+      const resize = e.target.classList.contains("fc-grip");
+      drag = { resize, sx: e.clientX, sy: e.clientY, x: r.left, y: r.top, w: r.width, h: r.height };
+      f.setPointerCapture(e.pointerId); e.preventDefault();
+    });
+    f.addEventListener("pointermove", e => {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      if (drag.resize) { f.style.width = Math.max(160, drag.w + dx) + "px"; f.style.height = Math.max(54, drag.h + dy) + "px"; }
+      else {
+        f.style.left = Math.min(innerWidth - 60, Math.max(-f.offsetWidth + 60, drag.x + dx)) + "px";
+        f.style.top = Math.min(innerHeight - 40, Math.max(0, drag.y + dy)) + "px";
+      }
+    });
+    const end = () => {
+      if (!drag) return; drag = null;
+      prefs.set("capPos", { x: parseInt(f.style.left), y: parseInt(f.style.top) });
+      prefs.set("capBox", { w: f.offsetWidth, h: f.offsetHeight });
+    };
+    f.addEventListener("pointerup", end); f.addEventListener("pointercancel", end);
+  }
+  f.style.setProperty("--fg", p.fg); f.style.setProperty("--bg", p.bg); f.style.setProperty("--size", p.size + "px");
+  f.classList.toggle("speaking", !!p.speaking);
+  const box = f.querySelector(".fc-text");
+  if (!p.text) box.innerHTML = `<span class="fc-hint">${esc(p.hint || "")}</span>`;
+  else if (p.word) { const [s, n] = p.word; box.innerHTML = esc(p.text.slice(0, s)) + `<mark>${esc(p.text.slice(s, s + n))}</mark>` + esc(p.text.slice(s + n)); }
+  else box.textContent = p.text;
+  const m = box.querySelector("mark"); if (m) m.scrollIntoView({ block: "nearest" }); else if (!p.speaking) box.scrollTop = 0;
 }
 
 /* ---------- file inputs ---------- */
@@ -1424,6 +1708,7 @@ async function boot(){
   S.net = Cloud.signedIn() ? (navigator.onLine === false ? "offline" : "syncing") : "local";
   render();
   syncNow();
+  if (prefs.get("capOn") && TAURI) setCaption(true);   // the Windows pop-out comes back where you left it on
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 boot();

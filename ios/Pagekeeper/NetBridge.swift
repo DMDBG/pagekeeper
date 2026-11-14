@@ -1,6 +1,8 @@
 import Foundation
 import WebKit
 import UIKit
+import AVFoundation
+import MediaPlayer
 
 /// Lets the reader page fetch catalogs and download files natively (no browser CORS limits),
 /// and open the in-app browser. Called from JS as:
@@ -8,6 +10,40 @@ import UIKit
 final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
     weak var webView: WKWebView?
     private var observers: [String: NSKeyValueObservation] = [:]
+
+    // MARK: volume
+    // iOS ignores volume set by a web page, so the player's slider moves the phone's media volume.
+    // An almost-invisible system volume view does that (and stops iOS showing its volume pop-up).
+    private lazy var volumeView: MPVolumeView = {
+        let v = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 120, height: 40))
+        v.alpha = 0.01
+        v.isUserInteractionEnabled = false
+        return v
+    }()
+    private var volumeObserver: NSKeyValueObservation?
+
+    private func setUpVolume() {
+        if volumeView.superview == nil, let web = webView { web.addSubview(volumeView) }
+        if volumeObserver == nil {
+            volumeObserver = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] session, _ in
+                let v = session.outputVolume
+                DispatchQueue.main.async {
+                    self?.webView?.evaluateJavaScript("window.pkVolume && window.pkVolume(\(v))")
+                }
+            }
+        }
+    }
+
+    private func setVolume(_ value: Float) {
+        setUpVolume()
+        let apply = { [weak self] in
+            guard let slider = self?.volumeView.subviews.compactMap({ $0 as? UISlider }).first else { return }
+            slider.setValue(value, animated: false)
+            slider.sendActions(for: .valueChanged)
+        }
+        apply()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: apply)   // the slider may appear a moment later
+    }
 
     static let downloadsDir: URL = {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("pkdl", isDirectory: true)
@@ -62,6 +98,15 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
                 try? FileManager.default.removeItem(at: Self.downloadsDir.appendingPathComponent(token))
             }
             replyHandler(true, nil)
+
+        case "volume":
+            let v = (body["value"] as? NSNumber)?.floatValue ?? 1
+            setVolume(max(0, min(1, v)))
+            replyHandler(true, nil)
+
+        case "volumeGet":
+            setUpVolume()
+            replyHandler(Double(AVAudioSession.sharedInstance().outputVolume), nil)
 
         case "browse":
             guard let url = Self.webURL(body["url"]) else { replyHandler(nil, "That isn't a web address."); return }

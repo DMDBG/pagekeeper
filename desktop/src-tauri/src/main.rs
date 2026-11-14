@@ -231,8 +231,45 @@ async fn pk_browse(app: AppHandle, url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// The pop-out text: a borderless, always-on-top window you can drag anywhere.
+#[tauri::command]
+async fn pk_caption(app: AppHandle, show: bool) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("caption") {
+        if show {
+            let _ = win.show();
+        } else {
+            let _ = win.close();
+        }
+        return Ok(());
+    }
+    if !show {
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(&app, "caption", WebviewUrl::App("caption.html".into()))
+        .title("Pagekeeper text")
+        .decorations(false)
+        .shadow(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(true)
+        .focused(false)
+        .inner_size(560.0, 150.0)
+        .min_inner_size(180.0, 56.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            // Closing the main window quits Pagekeeper, pop-out and browser windows included.
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    window.app_handle().exit(0);
+                }
+            }
+        })
         .setup(|app| {
             // Clear leftovers from the last run.
             if let Ok(dir) = app.path().app_cache_dir() {
@@ -240,7 +277,7 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse])
+        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption])
         .run(tauri::generate_context!())
         .expect("error while running Pagekeeper");
 }
