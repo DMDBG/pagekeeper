@@ -1,0 +1,52 @@
+name: Build iPhone app (IPA)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bundle libraries and draw icons
+        run: bash scripts/prepare-web.sh
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Create Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build (unsigned; Sideloadly signs it with your Apple ID)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Pagekeeper.xcodeproj \
+            -scheme Pagekeeper \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -n 40
+
+      - name: Package Pagekeeper.ipa
+        working-directory: ios
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Pagekeeper.app Payload/
+          test -f Payload/Pagekeeper.app/web/index.html   # the reader must be inside the app
+          zip -qry Pagekeeper.ipa Payload
+          ls -lh Pagekeeper.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pagekeeper-ipa
+          path: ios/Pagekeeper.ipa
+          retention-days: 30

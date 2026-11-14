@@ -1,0 +1,48 @@
+# XcodeGen spec: turns this file into Pagekeeper.xcodeproj (the GitHub build does this for you).
+name: Pagekeeper
+options:
+  bundleIdPrefix: app.pagekeeper
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  Pagekeeper:
+    type: application
+    platform: iOS
+    scheme: {}
+    sources:
+      - path: Pagekeeper
+      # The web app is copied in as a folder, so it works with no internet.
+      - path: ../web
+        type: folder
+        buildPhase: resources
+    info:
+      path: Pagekeeper/Info.plist
+      properties:
+        CFBundleDisplayName: Pagekeeper
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
+        ITSAppUsesNonExemptEncryption: false
+        LSSupportsOpeningDocumentsInPlace: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.pagekeeper.reader
+        PRODUCT_NAME: Pagekeeper
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Manual

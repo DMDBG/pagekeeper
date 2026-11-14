@@ -1,0 +1,11 @@
+# Made by scripts/prepare-web.sh during every build
+web/vendor/
+web/icons/
+ios/Pagekeeper/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+# Made by XcodeGen / xcodebuild
+ios/Pagekeeper.xcodeproj/
+ios/Pagekeeper/Info.plist
+ios/build/
+ios/Payload/
+*.ipa
+.DS_Store
