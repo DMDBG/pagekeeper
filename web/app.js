@@ -9,9 +9,10 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "player-popout-1", items: [
-  "<b>Full audio player:</b> open a book, tap the headphones. Drag the bar to skip anywhere, jump back or ahead, change speed from 0.5× to 3×, and set the volume.",
-  "<b>Pop-out text:</b> tap the window button at the top of a book. It floats on top of everything; pick its colors under <b>Aa</b>.",
+const WHATS_NEW = { id: "player-popout-2", items: [
+  "<b>Player for every book:</b> tap the headphones in any book. Without an audiobook it reads aloud: pause, skip a sentence, drag to any sentence, and change speed, volume and voice.",
+  "<b>Audiobooks:</b> the same player with a scrubber, skip back and ahead, speed from 0.5× to 3×, and volume. Switch between Audiobook and Read aloud at the top.",
+  "<b>Pop-out text:</b> tap the window button at the top of a book. \"Just text\" floats the words on your screen with no box; use Invert to swap the colors. Settings are under <b>Aa</b>.",
   "<b>Follow along:</b> Read aloud can highlight the sentence or the exact word. Choose under <b>Aa</b>.",
   "<b>Discover:</b> search Project Gutenberg and LibriVox, or add your own repos, without leaving the app."
 ] };
@@ -1019,7 +1020,8 @@ async function librivoxAdd(x){
 /* ---------- reader ---------- */
 async function openBook(id){
   S.cur = id; S.view = "reader"; S.sheet = null; S.page = Math.max(1, S.books[id].page || 1);
-  S.dock = false; S.reading = false;
+  stopReadAloud();
+  S.dock = false; S.reading = false; S.playerMode = null; TTS.idx = 0; TTS.count = 0;
   renderReader(); await showPage();
 }
 function closeReader(){
@@ -1057,8 +1059,8 @@ function renderReader(){
   $("#rType").onclick = () => toggleSheet("type");
   $("#rAudio").onclick = () => {
     S.dock = !S.dock;
-    // With an audiobook, the headphones open the full player straight away.
-    if (S.dock) S.bigPlayer = !!(S.books[S.cur].audio && S.books[S.cur].audio.tracks && S.books[S.cur].audio.tracks.length);
+    // The headphones open the full player: audiobook if the book has one, otherwise Read aloud.
+    if (S.dock) S.bigPlayer = true;
     $("#rAudio").setAttribute("aria-pressed", S.dock); updateDock();
   };
   $("#rPop").onclick = () => {
@@ -1147,13 +1149,17 @@ function updateReaderChrome(){
   $("#rNum").textContent = `${S.page} / ${T}`;
   $("#rPrev").disabled = S.page <= 1; $("#rNext").disabled = S.page >= T;
 }
-async function goto(n, fromRemote){
+async function goto(n, fromRemote, fromTts){
   const T = total(); n = Math.min(Math.max(1, n), T);
   if (n === S.page && !fromRemote) return;
   S.page = n;
   save(S.cur, { page: n, pages: T });
   if (S.sheet === "toc") renderSheet();
+  if (!fromTts) TTS.idx = 0;
   await showPage();
+  // Turning the page yourself while it reads aloud: keep reading from the top of the new page.
+  if (!fromTts && S.reading && !TTS.paused) ttsStart(0);
+  else if (S.dock && playerMode() === "tts") updateTtsUI();
 }
 document.addEventListener("keydown", e => {
   if (S.view !== "reader" || e.target.closest("input,select,textarea")) return;
@@ -1187,27 +1193,40 @@ function renderSheet(){
       <div class="field"><label>Highlight while reading aloud</label><div class="seg">${[["sentence","Sentence"],["word","Word"],["off","Off"]].map(([k,l]) => `<button data-hl="${k}" aria-pressed="${(prefs.get("hl") || "sentence") === k}">${l}</button>`).join("")}</div>
         <span class="note">Follows along when you use Read aloud on EPUB and text books. Audiobook files can't be matched to the text word by word.</span></div>
       <div class="field"><label>Read-aloud speed · ${rateTxt(prefs.get("ttsRate") || 1)}</label><div class="seg">${[0.8, 1, 1.2, 1.5].map(r => `<button data-tts="${r}" aria-pressed="${(prefs.get("ttsRate") || 1) === r}">${rateTxt(r)}</button>`).join("")}</div></div></div>`;
-    const cap = capCfg(), capOn = !!prefs.get("capOn");
+    const cap = capCfg(), capOn = !!prefs.get("capOn"), clear = cap.style === "clear";
     el.querySelector(".sheet").insertAdjacentHTML("beforeend", `
       <div class="field"><label>Pop-out text</label>
         <div class="seg"><button id="capToggle" aria-pressed="${capOn}">${capOn ? "Hide pop-out" : "Show pop-out"}</button></div>
-        <span class="note">${TAURI ? "A borderless window that stays on top of everything. Drag it anywhere; drag its edges to resize." : "A floating panel you can drag around. Drag its corner to resize."} It shows the sentence being read aloud, or the page you're on.</span></div>
+        <span class="note">${TAURI ? "Floats on top of everything on your screen. Drag it anywhere; drag its edges to resize." : "Floats over Pagekeeper. Drag it around; drag its corner to resize."} It shows the sentence being read aloud, or the page you're on.</span></div>
+      <div class="field"><label>Pop-out style</label>
+        <div class="seg">
+          <button data-capstyle="clear" aria-pressed="${clear}">Just text</button>
+          <button data-capstyle="solid" aria-pressed="${!clear}">Text on a box</button>
+          ${TAURI ? "" : `<button id="capAuto" aria-pressed="${!!cap.auto}">Auto-invert</button>`}
+        </div>
+        <span class="note">${clear ? "No background. Each letter gets a thin outline so it stays readable on light and dark." : "Text on a solid box in the background color."}
+          ${TAURI ? "" : " Auto-invert makes the text white over dark parts and black over light parts."}</span></div>
       <div class="field"><label>Pop-out colors</label>
         <div class="capcolors">
-          <label class="cc">Text <input type="color" id="capFg" value="${esc(cap.fg)}"></label>
-          <label class="cc">Background <input type="color" id="capBg" value="${esc(cap.bg)}"></label>
-          <span class="cap-sample" style="color:${esc(cap.fg)};background:${esc(cap.bg)}">Sample text</span>
+          <label class="cc">Text <input type="color" id="capFg" value="${esc(cap.fg)}" ${cap.auto && !TAURI ? "disabled" : ""}></label>
+          <label class="cc">${clear ? "Outline" : "Background"} <input type="color" id="capBg" value="${esc(cap.bg)}" ${cap.auto && !TAURI ? "disabled" : ""}></label>
+          <span class="cap-sample ${clear ? "clear" : ""}" style="color:${esc(cap.fg)};--o:${esc(cap.bg)};${clear ? "" : `background:${esc(cap.bg)}`}">Sample text</span>
         </div>
         <div class="seg" style="margin-top:8px">
+          <button id="capInvert">Invert colors</button>
           <button data-capsz="-1" aria-label="Smaller pop-out text">A−</button><button data-capsz="1" aria-label="Larger pop-out text">A+</button>
-          <button id="capReset">Reset to dark</button>
+          <button id="capReset">Reset</button>
         </div></div>`);
-    $("#capToggle").onclick = () => { setCaption(!prefs.get("capOn")); renderSheet(); };
+    $("#capToggle").onclick = () => { setCaption(!prefs.get("capOn")); const rp = $("#rPop"); if (rp) rp.setAttribute("aria-pressed", !!prefs.get("capOn")); renderSheet(); };
+    el.querySelectorAll("[data-capstyle]").forEach(b => b.onclick = () => { prefs.set("capStyle", b.dataset.capstyle); capSend(); renderSheet(); });
+    const ca = $("#capAuto"); if (ca) ca.onclick = () => { prefs.set("capAuto", !capCfg().auto); capSend(); renderSheet(); };
     const colorChange = () => { prefs.set("capFg", $("#capFg").value); prefs.set("capBg", $("#capBg").value);
-      const s = el.querySelector(".cap-sample"); s.style.color = $("#capFg").value; s.style.background = $("#capBg").value; capSend(); };
+      const s = el.querySelector(".cap-sample"); s.style.color = $("#capFg").value; s.style.setProperty("--o", $("#capBg").value);
+      if (capCfg().style !== "clear") s.style.background = $("#capBg").value; capSend(); };
     $("#capFg").oninput = colorChange; $("#capBg").oninput = colorChange;
+    $("#capInvert").onclick = () => { const c = capCfg(); prefs.set("capFg", c.bg); prefs.set("capBg", c.fg); capSend(); renderSheet(); };
     el.querySelectorAll("[data-capsz]").forEach(b => b.onclick = () => { prefs.set("capSize", Math.min(48, Math.max(12, capCfg().size + 2 * +b.dataset.capsz))); capSend(); });
-    $("#capReset").onclick = () => { prefs.set("capFg", undefined); prefs.set("capBg", undefined); prefs.set("capSize", undefined); capSend(); renderSheet(); };
+    $("#capReset").onclick = () => { ["capFg", "capBg", "capSize", "capStyle", "capAuto"].forEach(k => prefs.set(k, undefined)); capSend(); renderSheet(); };
     el.querySelectorAll("[data-hl]").forEach(b => b.onclick = () => { prefs.set("hl", b.dataset.hl); if (b.dataset.hl === "off") clearHighlights(); renderSheet(); });
     el.querySelectorAll("[data-tts]").forEach(b => b.onclick = () => { prefs.set("ttsRate", +b.dataset.tts); renderSheet(); });
     el.querySelectorAll("[data-paper]").forEach(b => b.onclick = () => { prefs.set("paper", b.dataset.paper); $(".reader").dataset.paper = b.dataset.paper; renderSheet(); });
@@ -1359,68 +1378,69 @@ au.addEventListener("ended", async () => {
   updateDock();
 });
 
-/* read aloud: the device's built-in voice, works offline */
+/* ---------- read aloud: the device's built-in voice, works offline ----------
+   Reads sentence by sentence so you can pause, skip a sentence, drag to any sentence,
+   and change speed, volume or voice while it reads. */
 const synth = window.speechSynthesis;
+const TTS = { run: 0, idx: 0, jump: null, paused: false, count: 0 };
+const SENT_RE = /[^.!?…]+[.!?…]+["'”’)\]]*\s*|[^.!?…]+$/g;
+const ttsRate = () => prefs.get("ttsRate") || 1;
+const ttsVolume = () => prefs.get("ttsVol") ?? 1;
 function pageText(){
   const c = S.content[S.cur]; if (!c) return Promise.resolve("");
   if (c.kind === "text") return Promise.resolve(c.pages[S.page - 1].map(b => b[1]).join("\n\n"));
   return c.pdf.getPage(S.page).then(p => p.getTextContent()).then(tc => tc.items.map(i => i.str).join(" ").replace(/\s+/g, " ").trim());
 }
-function speak(text){
-  return new Promise((res, rej) => {
-    const parts = text.match(/[^.!?]+[.!?]+["')\]]*\s*|[^.!?]+$/g) || [text]; let i = 0;
-    const next = () => {
-      if (!S.reading) return rej(new Error("stopped"));
-      if (i >= parts.length) return res();
-      const u = new SpeechSynthesisUtterance(parts[i++].trim()); u.rate = prefs.get("ttsRate") || 1;
-      u.onend = next; u.onerror = e => (e.error === "interrupted" || e.error === "canceled") ? rej(new Error("stopped")) : next();
-      synth.speak(u);
-    };
-    next();
-  });
+function ttsVoice(){
+  const want = prefs.get("ttsVoice"); if (!want || !synth) return null;
+  return synth.getVoices().find(v => v.voiceURI === want) || null;
 }
-async function readAloud(){
-  if (!synth) return;
-  if (S.reading) { stopReadAloud(); return; }
-  if (!au.paused) au.pause();
-  S.reading = true; updateDock();
-  while (S.reading && S.view === "reader") {
-    try { await speakPage(); } catch { break; }
-    if (!S.reading) break;
-    if (S.page >= total()) break;
-    await goto(S.page + 1);
-  }
-  S.reading = false; capNow.speaking = false; capSend(); updateDock();
+function makeUtterance(text){
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = ttsRate(); u.volume = IOS ? 1 : ttsVolume();
+  const v = ttsVoice(); if (v) { u.voice = v; u.lang = v.lang; }
+  return u;
 }
-function stopReadAloud(){ if (S.reading) { S.reading = false; try { synth && synth.cancel(); } catch {} clearHighlights(); capNow.speaking = false; capSend(); updateDock(); } }
-
-/* Speak the page sentence by sentence, highlighting as it goes (setting: sentence, word or off). */
 function clearHighlight(el){
+  if (!el) return;
   el.classList.remove("hl", "soft");
   if (el.dataset.w) { el.textContent = el.dataset.t; delete el.dataset.w; }
 }
 function clearHighlights(){ document.querySelectorAll(".page [data-s]").forEach(clearHighlight); }
-function speakPage(){
-  const spans = [...document.querySelectorAll(".page [data-s]")];
-  if (!spans.length) return pageText().then(t => t ? speak(t) : null);   // PDFs: read without highlighting
-  return new Promise((res, rej) => {
+async function ttsItems(){
+  const spans = [...document.querySelectorAll(".page [data-s]")].filter(s => s.textContent.trim());
+  if (spans.length) return spans.map(el => ({ text: el.textContent, el }));
+  // PDFs: read the page's text sentence by sentence, without highlighting.
+  const t = await pageText();
+  return (t.match(SENT_RE) || []).map(s => s.trim()).filter(Boolean).map(text => ({ text, el: null }));
+}
+function ttsSpeakPage(run, items){
+  TTS.count = items.length;
+  return new Promise(resolve => {
     const mode = prefs.get("hl") || "sentence";
-    let i = 0, prev = null;
+    let prev = null;
     const next = () => {
-      if (prev) clearHighlight(prev);
-      if (!S.reading) return rej(new Error("stopped"));
-      if (i >= spans.length) return res();
-      const el = spans[i++]; prev = el;
-      const text = el.textContent; el.dataset.t = text;
-      if (!text.trim()) return next();
-      if (mode !== "off") {
+      if (prev) clearHighlight(prev.el);
+      if (run !== TTS.run) return resolve("stopped");
+      if (TTS.idx >= items.length) return resolve("done");
+      const it = items[TTS.idx]; prev = it;
+      const text = it.text, el = it.el;
+      if (el) el.dataset.t = text;
+      updateTtsUI();
+      if (el && mode !== "off") {
         el.classList.add("hl"); if (mode === "word") el.classList.add("soft");
         el.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
       }
       const lead = text.length - text.trimStart().length;
       capNow.speaking = true; capNow.text = text.trim(); capNow.word = null; capSend();
-      const u = new SpeechSynthesisUtterance(text.trim());
-      u.rate = prefs.get("ttsRate") || 1;
+      const u = makeUtterance(text.trim());
+      let finished = false;
+      const after = advance => {
+        if (finished) return; finished = true;
+        if (TTS.jump !== null) { TTS.idx = TTS.jump; TTS.jump = null; }
+        else if (advance) TTS.idx++;
+        next();
+      };
       u.onboundary = ev => {
         if (ev.name && ev.name !== "word") return;
         const start = ev.charIndex + lead;
@@ -1428,24 +1448,85 @@ function speakPage(){
         if (!len) { const m = text.slice(start).match(/^[^\s]+/); len = m ? m[0].length : 0; }
         if (!len) return;
         capNow.word = [ev.charIndex, len]; capSend();
-        if (mode !== "word") return;
+        if (mode !== "word" || !el) return;
         el.dataset.w = "1";
         el.innerHTML = esc(text.slice(0, start)) + `<mark class="w">${esc(text.slice(start, start + len))}</mark>` + esc(text.slice(start + len));
       };
-      u.onend = next;
-      u.onerror = e => (e.error === "interrupted" || e.error === "canceled") ? (clearHighlight(el), rej(new Error("stopped"))) : next();
+      u.onend = () => after(true);
+      u.onerror = e => {
+        if (e.error === "interrupted" || e.error === "canceled") {
+          if (TTS.jump !== null) after(false);
+          else { finished = true; clearHighlight(el); resolve("stopped"); }
+        } else after(true);
+      };
       synth.speak(u);
     };
     next();
   });
 }
+async function ttsStart(fromIdx = 0){
+  if (!synth) { toast("This device has no built-in voice for reading aloud."); return; }
+  if (!au.paused) au.pause();
+  try { synth.cancel(); } catch {}
+  const run = ++TTS.run;
+  S.reading = true; TTS.paused = false; TTS.idx = Math.max(0, fromIdx); TTS.jump = null;
+  updateDock();
+  while (run === TTS.run && S.view === "reader") {
+    const items = await ttsItems();
+    if (!items.length) { if (S.page >= total()) break; TTS.idx = 0; await goto(S.page + 1, false, true); continue; }
+    const r = await ttsSpeakPage(run, items);
+    if (r !== "done" || run !== TTS.run) break;
+    if (S.page >= total()) break;
+    TTS.idx = 0; await goto(S.page + 1, false, true);
+  }
+  if (run === TTS.run) { S.reading = false; TTS.paused = false; clearHighlights(); capNow.speaking = false; capSend(); updateDock(); }
+}
+function stopReadAloud(){
+  if (!S.reading) return;
+  TTS.run++; S.reading = false; TTS.paused = false;
+  try { synth.cancel(); } catch {}
+  clearHighlights(); capNow.speaking = false; capSend(); updateDock();
+}
+function readAloud(){ if (S.reading) stopReadAloud(); else ttsStart(TTS.idx || 0); }
+function ttsPlayPause(){
+  if (!S.reading) { ttsStart(TTS.idx || 0); return; }
+  try { if (TTS.paused) { synth.resume(); TTS.paused = false; } else { synth.pause(); TTS.paused = true; } } catch {}
+  updateTtsUI();
+}
+function ttsJumpTo(i){
+  const n = TTS.count || document.querySelectorAll(".page [data-s]").length;
+  if (i < 0) { if (S.page > 1) ttsGotoPage(-1); return; }
+  if (n && i >= n) { if (S.page < total()) ttsGotoPage(1); return; }
+  if (!S.reading) { ttsStart(i); return; }
+  if (TTS.paused) { try { synth.resume(); } catch {} TTS.paused = false; }
+  TTS.jump = i; try { synth.cancel(); } catch {}
+  // Some voices don't report the interruption; restart from the chosen sentence if nothing happens.
+  setTimeout(() => { if (TTS.jump === i) { TTS.jump = null; ttsStart(i); } }, 700);
+}
+async function ttsGotoPage(delta){
+  const was = S.reading && !TTS.paused;
+  stopReadAloud(); TTS.idx = 0;
+  await goto(S.page + delta, false, true);
+  if (was) ttsStart(0); else updateDock();
+}
+function ttsRestartSentence(){ if (S.reading && !TTS.paused) ttsJumpTo(TTS.idx); }
+function updateTtsUI(){
+  const s = $("#ttsSeek"); const n = TTS.count || document.querySelectorAll(".page [data-s]").length || 1;
+  if (s && !S.scrubbing) { s.max = Math.max(0, n - 1); s.value = Math.min(TTS.idx, n - 1); paintRange(s); }
+  const pos = $("#ttsPos"); if (pos) pos.textContent = `Sentence ${Math.min(TTS.idx + 1, n)} of ${n}`;
+  const pg = $("#ttsPage"); if (pg) pg.textContent = `Page ${S.page} of ${total()}`;
+  const pb = $("#ttsPlay");
+  if (pb) { const on = S.reading && !TTS.paused; pb.innerHTML = on ? ICON.pause : ICON.play; pb.setAttribute("aria-label", on ? "Pause reading" : "Read aloud"); }
+}
 
-/* ---------- audio player (Libby-style: scrubber, skip, speed, volume) ---------- */
+/* ---------- player (Libby-style: scrubber, skip, speed, volume) for audiobooks and Read aloud ---------- */
 Object.assign(ICON, {
   up:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>',
   downChev:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
   prev:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>',
   nextp:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>',
+  sback:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 6v12L2.5 12zM21 6v12l-8.5-6z"/></svg>',
+  sfwd:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 6v12l8.5-6zM3 6v12l8.5-6z"/></svg>',
   vol:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM15.5 8.5a5 5 0 010 7M19 5a10 10 0 010 14"/></svg>',
   mute:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM23 9l-6 6M17 9l6 6"/></svg>',
   pop:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="11" y="11" width="9" height="7" rx="1" fill="currentColor" stroke="none"/></svg>'
@@ -1457,13 +1538,20 @@ const curRate = () => prefs.get("rate") || 1;
 const rateTxt = r => (+(+r).toFixed(2)) + "×";
 const curTi = b => auBook && auBook.id === S.cur ? auBook.track : ((b && b.audio && b.audio.track) || 0);
 try { au.preservesPitch = true; au.webkitPreservesPitch = true; } catch {}
+const playerMode = () => S.playerMode || ((((S.books[S.cur] || {}).audio || {}).tracks || []).length ? "book" : "tts");
 
 function setRate(r){
   r = Math.min(3, Math.max(0.5, Math.round(r * 20) / 20));
   prefs.set("rate", r); au.defaultPlaybackRate = r; au.playbackRate = r;
+  paintRates(r); updateTimes();
+}
+function setTtsRate(r){
+  r = Math.min(2.5, Math.max(0.5, Math.round(r * 20) / 20));
+  prefs.set("ttsRate", r); paintRates(r); ttsRestartSentence();
+}
+function paintRates(r){
   document.querySelectorAll("[data-rate-label]").forEach(x => { x.textContent = rateTxt(r); });
   document.querySelectorAll("[data-rate]").forEach(x => x.setAttribute("aria-pressed", String(+x.dataset.rate === r)));
-  updateTimes();
 }
 async function ensureLoaded(){
   const b = S.books[S.cur]; if (!b || !(b.audio && b.audio.tracks && b.audio.tracks.length)) return false;
@@ -1499,19 +1587,23 @@ function updateTimes(){
   if (sp) sp.textContent = isFinite(dur) && curRate() !== 1 ? `${fmt(Math.max(0, dur - cur) / curRate())} left at ${rateTxt(curRate())}` : "";
 }
 
-/* Volume: the audio element on PC; the phone's own media volume on iPhone (iOS ignores page volume). */
+/* Volume: the audio element on PC; the phone's own media volume on iPhone (iOS ignores page volume).
+   Read aloud keeps its own volume on PC. */
 let vol = IOS ? null : (prefs.get("vol") ?? 1), lastVol = 0.7;
 if (!IOS) au.volume = vol;
 window.pkVolume = v => { vol = +v; paintVol(); };
+const shownVol = () => IOS ? vol : (playerMode() === "tts" ? ttsVolume() : vol);
 function paintVol(){
+  const v = shownVol();
   const s = $("#auVol");
-  if (s && vol != null && !s.matches(":active")) { s.value = vol; paintRange(s); }
-  const m = $("#auMute"); if (m) { m.innerHTML = vol === 0 ? ICON.mute : ICON.vol; m.setAttribute("aria-label", vol === 0 ? "Unmute" : "Mute"); }
+  if (s && v != null && !s.matches(":active")) { s.value = v; paintRange(s); }
+  const m = $("#auMute"); if (m) { m.innerHTML = v === 0 ? ICON.mute : ICON.vol; m.setAttribute("aria-label", v === 0 ? "Unmute" : "Mute"); }
 }
 function setVol(v){
-  v = Math.min(1, Math.max(0, v)); vol = v;
-  if (IOS) Native.call({ op: "volume", value: v }).catch(() => {});
-  else { au.volume = v; prefs.set("vol", v); }
+  v = Math.min(1, Math.max(0, v));
+  if (IOS) { vol = v; Native.call({ op: "volume", value: v }).catch(() => {}); }
+  else if (playerMode() === "tts") { prefs.set("ttsVol", v); clearTimeout(setVol.t); setVol.t = setTimeout(ttsRestartSentence, 250); }
+  else { vol = v; au.volume = v; prefs.set("vol", v); }
   paintVol();
 }
 
@@ -1519,18 +1611,82 @@ function updateDock(){
   const el = $("#dock"); if (!el) return;
   if (!S.dock) { el.innerHTML = ""; return; }
   const b = S.books[S.cur]; const tracks = (b.audio && b.audio.tracks) || [];
-  const own = auBook && auBook.id === S.cur;
-  const playing = own && !au.paused;
-  const ttsBtn = synth ? `<button class="btn" id="tts">${ICON.speak} ${S.reading ? "Stop reading" : "Read aloud"}</button>` : "";
-  if (!tracks.length) {
-    el.innerHTML = `<div class="dock"><div class="row1" style="flex-wrap:wrap;gap:10px">
-      <div class="trk" style="min-width:200px"><b>No audiobook yet</b><span>Add MP3, M4A or M4B files or a LibriVox zip, or get one in Discover.</span></div>
-      <button class="btn primary" id="auAdd">${ICON.plus} Add audio</button>${ttsBtn}</div></div>`;
+  const mode = playerMode(), big = !!S.bigPlayer;
+  const modeSwitch = `<div class="seg pl-mode" role="group" aria-label="What to play">
+      <button data-pmode="book" aria-pressed="${mode === "book"}">Audiobook${tracks.length ? "" : " (none yet)"}</button>
+      <button data-pmode="tts" aria-pressed="${mode === "tts"}">Read aloud</button></div>`;
+  const head = big ? `<div class="pl-head"><button class="ib" id="auExpand" aria-label="Make the player smaller">${ICON.downChev}</button>${modeSwitch}<span class="pl-spacer"></span></div>` : "";
+  const expandBtn = big ? "" : `<button class="ib" id="auExpand" aria-label="Open the full player">${ICON.up}</button>`;
+  const speedRow = (r, label) => `<div class="pl-row"><label>Speed</label>
+      <div class="ratebox"><button class="ib" id="auSlower" aria-label="Slower">−</button><b data-rate-label>${rateTxt(r)}</b><button class="ib" id="auFaster" aria-label="Faster">+</button></div>
+      <div class="chips">${SPEEDS.map(x => `<button class="chip" data-rate="${x}" aria-pressed="${x === r}">${rateTxt(x)}</button>`).join("")}</div>${label ? `<span class="note">${label}</span>` : ""}</div>`;
+  const volRow = `<div class="pl-row"><label>Volume</label><button class="ib" id="auMute" aria-label="Mute">${ICON.vol}</button>
+      <input type="range" class="scrub vol" id="auVol" min="0" max="1" step="0.01" value="${shownVol() == null ? 1 : shownVol()}" aria-label="Volume"></div>`;
+  const popRow = `<div class="pl-row"><label>Pop-out</label><button class="btn" id="plPop">${prefs.get("capOn") ? "Hide pop-out text" : "Show pop-out text"}</button><span class="note">Colors and style under Aa.</span></div>`;
+
+  if (mode === "tts") {
+    const n = TTS.count || document.querySelectorAll(".page [data-s]").length || 1;
+    const on = S.reading && !TTS.paused;
+    const hlMode = prefs.get("hl") || "sentence";
+    const voices = synth ? synth.getVoices() : [];
+    const want = prefs.get("ttsVoice") || "";
+    const voiceName = (ttsVoice() || {}).name || "Device voice";
+    const r = ttsRate();
+    const scrub = `<input type="range" class="scrub" id="ttsSeek" min="0" max="${Math.max(0, n - 1)}" step="1" value="${Math.min(TTS.idx, n - 1)}" aria-label="Sentence on this page">
+      <div class="pl-time"><span id="ttsPos">Sentence ${Math.min(TTS.idx + 1, n)} of ${n}</span><span id="ttsPage">Page ${S.page} of ${total()}</span></div>`;
+    const ctrls = `<button class="ib skipbtn" id="ttsBack" aria-label="Previous sentence">${ICON.sback}</button>
+      <button class="play" id="ttsPlay" aria-label="${on ? "Pause reading" : "Read aloud"}">${on ? ICON.pause : ICON.play}</button>
+      <button class="ib skipbtn" id="ttsFwd" aria-label="Next sentence">${ICON.sfwd}</button>`;
+    if (!synth) {
+      el.innerHTML = `<div class="dock${big ? " big" : ""}">${head}<p class="note">This device has no built-in voice for reading aloud.</p></div>`;
+    } else if (!big) {
+      el.innerHTML = `<div class="dock"><div class="row1">${ctrls}
+          <div class="trk"><b>Read aloud</b><span>${esc(voiceName)}</span></div>
+          <button class="chip" id="auRateBtn" aria-label="Reading speed, tap to change"><span data-rate-label>${rateTxt(r)}</span></button>${expandBtn}
+        </div>${scrub}</div>`;
+    } else {
+      el.innerHTML = `<div class="dock big">${head}
+        <div class="pl-top">${coverHTML(b).replace('class="cover"', 'class="cover pl-cover"')}
+          <div class="trk"><b>Read aloud · ${esc(voiceName)}</b><span>${esc(b.title)}</span></div></div>
+        ${scrub}
+        <div class="pl-ctrls"><button class="ib" id="ttsPrevPage" aria-label="Previous page" ${S.page > 1 ? "" : "disabled"}>${ICON.prev}</button>${ctrls}
+          <button class="ib" id="ttsNextPage" aria-label="Next page" ${S.page < total() ? "" : "disabled"}>${ICON.nextp}</button></div>
+        ${speedRow(r)}
+        ${volRow}
+        <div class="pl-row"><label>Voice</label><select id="ttsVoiceSel" aria-label="Voice"><option value="">Device default</option>${voices.map(v => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === want ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`).join("")}</select></div>
+        <div class="pl-row"><label>Highlight</label><div class="chips">${[["sentence","Sentence"],["word","Word"],["off","Off"]].map(([k, l]) => `<button class="chip" data-hl="${k}" aria-pressed="${hlMode === k}">${l}</button>`).join("")}</div></div>
+        ${popRow}
+      </div>`;
+    }
+    if (synth) {
+      $("#ttsPlay").onclick = ttsPlayPause;
+      $("#ttsBack").onclick = () => ttsJumpTo(TTS.idx - 1);
+      $("#ttsFwd").onclick = () => ttsJumpTo(TTS.idx + 1);
+      const pp = $("#ttsPrevPage"); if (pp) pp.onclick = () => ttsGotoPage(-1);
+      const np = $("#ttsNextPage"); if (np) np.onclick = () => ttsGotoPage(1);
+      const seek = $("#ttsSeek");
+      seek.oninput = () => { S.scrubbing = true; paintRange(seek); $("#ttsPos").textContent = `Sentence ${+seek.value + 1} of ${n}`; };
+      seek.onchange = () => { S.scrubbing = false; ttsJumpTo(+seek.value); };
+      paintRange(seek);
+      const rb = $("#auRateBtn"); if (rb) rb.onclick = () => { const i = SPEEDS.indexOf(ttsRate()); setTtsRate(SPEEDS[(i + 1) % SPEEDS.length]); };
+      const sl = $("#auSlower"); if (sl) sl.onclick = () => setTtsRate(ttsRate() - 0.05);
+      const fa = $("#auFaster"); if (fa) fa.onclick = () => setTtsRate(ttsRate() + 0.05);
+      el.querySelectorAll("[data-rate]").forEach(x => x.onclick = () => setTtsRate(+x.dataset.rate));
+      const vs = $("#ttsVoiceSel"); if (vs) vs.onchange = () => { prefs.set("ttsVoice", vs.value || undefined); ttsRestartSentence(); updateDock(); };
+      el.querySelectorAll("[data-hl]").forEach(x => x.onclick = () => { prefs.set("hl", x.dataset.hl); if (x.dataset.hl === "off") clearHighlights(); updateDock(); ttsRestartSentence(); });
+      if (synth && !voices.length && !updateDock.waitingVoices) { updateDock.waitingVoices = true; synth.addEventListener("voiceschanged", () => { if (S.dock && playerMode() === "tts") updateDock(); }, { once: true }); }
+    }
+  } else if (!tracks.length) {
+    el.innerHTML = `<div class="dock${big ? " big" : ""}">${head}
+      <div class="row1" style="flex-wrap:wrap;gap:10px">
+        <div class="trk" style="min-width:200px"><b>No audiobook for this book yet</b><span>Add MP3, M4A or M4B files or a LibriVox zip, or find a free one in Discover. Read aloud works right now.</span></div>
+        <button class="btn primary" id="auAdd">${ICON.plus} Add audio</button><button class="btn" id="goDisc">Find in Discover</button>${big ? "" : expandBtn}</div></div>`;
+    const gd = $("#goDisc"); if (gd) gd.onclick = () => { closeReader(); S.view = "find"; S.disc = null; render(); setTimeout(() => openRepo("librivox"), 0); };
   } else {
     if (tracks.some(x => S.haveLocal[x.key] === undefined)) checkLocal(S.cur).then(() => S.dock && updateDock());
+    const own = auBook && auBook.id === S.cur, playing = own && !au.paused;
     const ti = curTi(b); const t = tracks[ti] || tracks[0];
-    const rate = curRate(), sk = skipSec(), big = !!S.bigPlayer;
-    // Load the current part (paused) so the scrubber knows its length.
+    const rate = curRate(), sk = skipSec();
     if (!own && S.haveLocal[t.key] && (au.paused || !auBook) && !S.preloading) {
       S.preloading = true;
       loadTrack(ti, (b.audio && b.audio.time) || 0).finally(() => { S.preloading = false; updateTimes(); });
@@ -1546,26 +1702,20 @@ function updateDock(){
           <button class="btn ${aurl ? "" : "primary"}" id="auMatch">${aurl ? "2. " : ""}Add matching files</button></div></div>`;
     if (cloudOnly.length) note += `<div class="missbox"><span>${cloudOnly.length} part${cloudOnly.length > 1 ? "s are" : " is"} in your account but not downloaded here (${esc(fmtSize(cloudOnly.reduce((n, x) => n + (x.size || 0), 0)))}).</span>
         <div><button class="btn" id="auDl">${ICON.down} Download for offline</button></div></div>`;
-
     const scrub = `<input type="range" class="scrub" id="auSeek" min="0" max="1" step="1" value="0" aria-label="Position in this part">
       <div class="pl-time"><span id="auCur">0:00</span><span id="auLeftSpeed"></span><span id="auLeft">–:––</span></div>`;
     const skipBtn = dir => `<button class="ib skipbtn" id="${dir < 0 ? "auBack" : "auFwd"}" aria-label="${dir < 0 ? "Back" : "Forward"} ${sk} seconds">${dir < 0 ? ICON.rw : ICON.ff}<span>${sk}</span></button>`;
     const playBtn = `<button class="play" id="auPlay" aria-label="${playing ? "Pause" : "Play"}">${playing ? ICON.pause : ICON.play}</button>`;
-
     if (!big) {
       el.innerHTML = `<div class="dock">${note}
-        <div class="row1">
-          ${skipBtn(-1)}${playBtn}${skipBtn(1)}
+        <div class="row1">${skipBtn(-1)}${playBtn}${skipBtn(1)}
           <div class="trk"><b>${esc(t.name)}</b><span>${tracks.length > 1 ? `Part ${ti + 1} of ${tracks.length}` : esc(b.title)}</span></div>
-          <button class="chip" id="auRateBtn" aria-label="Playback speed, tap to change"><span data-rate-label>${rateTxt(rate)}</span></button>
-          <button class="ib" id="auExpand" aria-label="Open the full player">${ICON.up}</button>
+          <button class="chip" id="auRateBtn" aria-label="Playback speed, tap to change"><span data-rate-label>${rateTxt(rate)}</span></button>${expandBtn}
         </div>${scrub}</div>`;
     } else {
       const list = S.showTracks ? `<ul class="tracks">${tracks.map((x, i) => `<li><button data-t="${i}" class="${i === ti ? "cur" : ""}"><span>${i + 1}. ${esc(x.name)}</span><span class="where">${S.haveLocal[x.key] ? "on this device" : x.asset ? "in your account" : S.haveLocal[x.key] === false ? "not on this device" : ""}</span></button></li>`).join("")}</ul>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn" id="auAdd">${ICON.plus} Add more</button>${ttsBtn}${aurl || tracks.some(x => x.size > MAX_FILE) ? `<button class="btn" id="auLink2">${aurl ? "Change" : "Add"} download link</button>` : ""}<button class="btn danger" id="auClear">Remove audio</button></div>` : "";
-      el.innerHTML = `<div class="dock big">
-        <div class="pl-head"><button class="ib" id="auExpand" aria-label="Close the full player">${ICON.downChev}</button><span>Now playing</span><span class="pl-spacer"></span></div>
-        ${note}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn" id="auAdd">${ICON.plus} Add more</button>${aurl || tracks.some(x => x.size > MAX_FILE) ? `<button class="btn" id="auLink2">${aurl ? "Change" : "Add"} download link</button>` : ""}<button class="btn danger" id="auClear">Remove audio</button></div>` : "";
+      el.innerHTML = `<div class="dock big">${head}${note}
         <div class="pl-top">${coverHTML(b).replace('class="cover"', 'class="cover pl-cover"')}
           <div class="trk"><b>${esc(t.name)}</b><span>${esc(b.title)}${tracks.length > 1 ? ` · part ${ti + 1} of ${tracks.length}` : ""}</span></div></div>
         ${scrub}
@@ -1574,21 +1724,17 @@ function updateDock(){
           ${skipBtn(-1)}${playBtn}${skipBtn(1)}
           <button class="ib" id="auNext" aria-label="Next part" ${ti < tracks.length - 1 ? "" : "disabled"}>${ICON.nextp}</button>
         </div>
-        <div class="pl-row"><label>Speed</label>
-          <div class="ratebox"><button class="ib" id="auSlower" aria-label="Slower">−</button><b data-rate-label>${rateTxt(rate)}</b><button class="ib" id="auFaster" aria-label="Faster">+</button></div>
-          <div class="chips">${SPEEDS.map(r => `<button class="chip" data-rate="${r}" aria-pressed="${r === rate}">${rateTxt(r)}</button>`).join("")}</div></div>
-        <div class="pl-row"><label>Volume</label><button class="ib" id="auMute" aria-label="Mute">${ICON.vol}</button>
-          <input type="range" class="scrub vol" id="auVol" min="0" max="1" step="0.01" value="${vol == null ? 1 : vol}" aria-label="Volume"></div>
+        ${speedRow(rate)}
+        ${volRow}
         <div class="pl-row"><label>Skip</label><div class="chips">${SKIPS.map(s => `<button class="chip" data-skip="${s}" aria-pressed="${s === sk}">${s} sec</button>`).join("")}</div></div>
         <div class="pl-row"><label>Parts</label><button class="btn" id="auList">${S.showTracks ? "Hide parts" : `Show all ${tracks.length}`}</button></div>
         ${list}
+        ${popRow}
       </div>`;
     }
-
     $("#auPlay").onclick = togglePlay;
     $("#auBack").onclick = () => skipBy(-sk);
     $("#auFwd").onclick = () => skipBy(sk);
-    $("#auExpand").onclick = () => { S.bigPlayer = !S.bigPlayer; updateDock(); };
     const seek = $("#auSeek");
     seek.oninput = () => {
       S.scrubbing = true; paintRange(seek);
@@ -1607,9 +1753,6 @@ function updateDock(){
     el.querySelectorAll("[data-skip]").forEach(x => x.onclick = () => { prefs.set("skip", +x.dataset.skip); updateDock(); });
     const pv = $("#auPrev"); if (pv) pv.onclick = () => goPart(-1);
     const nx = $("#auNext"); if (nx) nx.onclick = () => goPart(1);
-    const vs = $("#auVol"); if (vs) { vs.oninput = () => { paintRange(vs); setVol(+vs.value); }; }
-    const mu = $("#auMute"); if (mu) mu.onclick = () => { if (vol > 0) { lastVol = vol; setVol(0); } else setVol(lastVol || 0.7); };
-    if (big && IOS && vol == null) Native.call({ op: "volumeGet" }).then(v => { vol = +v; paintVol(); }).catch(() => {});
     const ls = $("#auList"); if (ls) ls.onclick = () => { S.showTracks = !S.showTracks; updateDock(); };
     const am = $("#auMatch"); if (am) am.onclick = () => $("#matchFile").click();
     el.querySelectorAll("[data-await-audio]").forEach(a => a.addEventListener("click", () => { S.awaitingAudio = S.cur; }));
@@ -1622,18 +1765,31 @@ function updateDock(){
       for (const x of tracks) { idb.del(x.key); if (x.asset && Cloud.signedIn()) Files.del(x.asset).catch(() => {}); }
       save(id, { audio: { tracks: [], track: 0, time: 0, url: "" } }, { now: true }); S.showTracks = false; updateDock();
     });
-    updateTimes(); paintVol();
+    updateTimes();
   }
+  // shared controls
+  const ex = $("#auExpand"); if (ex) ex.onclick = () => { S.bigPlayer = !S.bigPlayer; updateDock(); };
+  el.querySelectorAll("[data-pmode]").forEach(x => x.onclick = () => {
+    const m = x.dataset.pmode; if (m === playerMode()) return;
+    if (m === "book") stopReadAloud(); else if (!au.paused) au.pause();
+    S.playerMode = m; updateDock();
+  });
+  const vs = $("#auVol"); if (vs) vs.oninput = () => { paintRange(vs); setVol(+vs.value); };
+  const mu = $("#auMute"); if (mu) mu.onclick = () => { const v = shownVol(); if (v > 0) { lastVol = v; setVol(0); } else setVol(lastVol || 0.7); };
+  if (big && IOS && vol == null) Native.call({ op: "volumeGet" }).then(v => { vol = +v; paintVol(); }).catch(() => {});
+  const pp = $("#plPop"); if (pp) pp.onclick = () => { setCaption(!prefs.get("capOn")); const rp = $("#rPop"); if (rp) rp.setAttribute("aria-pressed", !!prefs.get("capOn")); updateDock(); };
   const add = $("#auAdd"); if (add) add.onclick = () => $("#audioFile").click();
-  const tb = $("#tts"); if (tb) tb.onclick = readAloud;
+  paintVol();
 }
 
 /* ---------- pop-out text ----------
    Windows app: a borderless, always-on-top window you drag anywhere on screen.
    iPhone and browser: a borderless panel you drag around inside Pagekeeper.
    Shows the sentence being read aloud (with the word, in Word mode), otherwise the page you're on. */
-const CAP_DEFAULT = { fg: "#E8E6E1", bg: "#111318", size: 22 };
-const capCfg = () => ({ fg: prefs.get("capFg") || CAP_DEFAULT.fg, bg: prefs.get("capBg") || CAP_DEFAULT.bg, size: prefs.get("capSize") || CAP_DEFAULT.size });
+// Default: just the text, white with a dark outline (readable on light and dark).
+const CAP_DEFAULT = { fg: "#FFFFFF", bg: "#111318", size: 24, style: "clear" };
+const capCfg = () => ({ fg: prefs.get("capFg") || CAP_DEFAULT.fg, bg: prefs.get("capBg") || CAP_DEFAULT.bg, size: prefs.get("capSize") || CAP_DEFAULT.size,
+  style: prefs.get("capStyle") || CAP_DEFAULT.style, auto: !TAURI && !!prefs.get("capAuto") });
 const capNow = { speaking: false, text: "", word: null };
 function capPayload(){
   let text = "", hint = "";
@@ -1697,6 +1853,8 @@ function renderFloatCap(p){
   }
   f.style.setProperty("--fg", p.fg); f.style.setProperty("--bg", p.bg); f.style.setProperty("--size", p.size + "px");
   f.classList.toggle("speaking", !!p.speaking);
+  f.classList.toggle("clear", p.style === "clear");
+  f.classList.toggle("auto", !!p.auto);
   const box = f.querySelector(".fc-text");
   if (!p.text) box.innerHTML = `<span class="fc-hint">${esc(p.hint || "")}</span>`;
   else if (p.word) { const [s, n] = p.word; box.innerHTML = esc(p.text.slice(0, s)) + `<mark>${esc(p.text.slice(s, s + n))}</mark>` + esc(p.text.slice(s + n)); }

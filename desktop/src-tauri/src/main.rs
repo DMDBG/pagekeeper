@@ -248,6 +248,7 @@ async fn pk_caption(app: AppHandle, show: bool) -> Result<(), String> {
     WebviewWindowBuilder::new(&app, "caption", WebviewUrl::App("caption.html".into()))
         .title("Pagekeeper text")
         .decorations(false)
+        .transparent(true)
         .shadow(false)
         .always_on_top(true)
         .skip_taskbar(true)
