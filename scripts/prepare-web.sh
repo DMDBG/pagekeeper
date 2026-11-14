@@ -9,3 +9,8 @@ fetch "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"        
 fetch "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"         pdf.min.js
 fetch "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"  pdf.worker.min.js
 node scripts/make-icon.js
+# Build stamp, shown in Settings so you can tell which version you're running.
+sha=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
+n=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+printf 'window.PK_BUILD = { version: "1.0.%s", sha: "%s", date: "%s" };\n' "$n" "$sha" "$(date -u +%Y-%m-%d)" > web/version.js
+echo "stamped build 1.0.$n ($sha)"

@@ -16,3 +16,4 @@ desktop/src-tauri/icons/
 desktop/src-tauri/gen/
 desktop/src-tauri/Cargo.lock
 Pagekeeper-Setup.exe
+web/version.js

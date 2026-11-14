@@ -57,6 +57,9 @@ header.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom
 .note{font-size:13px;color:var(--muted)}
 .banner{background:var(--accent-soft);color:var(--ink);border-radius:var(--r);padding:12px 14px;font-size:13.5px;margin-bottom:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .banner span{flex:1;min-width:200px}
+.banner.whatsnew{align-items:flex-start}
+.banner.whatsnew > div{flex:1;min-width:220px}
+.banner.whatsnew ul{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:22px 18px}
 .book{display:flex;flex-direction:column;gap:8px;min-width:0;position:relative}
 .book .open{all:unset;cursor:pointer;display:flex;flex-direction:column;gap:8px}
@@ -236,6 +239,7 @@ input.scrub:active::-webkit-slider-thumb{transform:scale(1.2)}
 <input type="file" id="matchFile" accept="audio/*,.mp3,.m4a,.m4b,.mp4,.webm,.ogg,.opus,.zip" multiple hidden>
 <input type="file" id="relinkFile" accept=".epub,.pdf,.txt" hidden>
 <script src="config.js"></script>
+<script src="version.js" onerror="void 0"></script>
 <script src="app.js"></script>
 </body>
 </html>

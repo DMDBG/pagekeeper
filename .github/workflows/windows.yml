@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history, so the build number counts every change
 
       - name: Bundle libraries and draw icons
         shell: bash
@@ -28,7 +30,11 @@ jobs:
 
       - name: Build installer
         working-directory: desktop
-        run: npx --yes @tauri-apps/cli@2 build
+        shell: bash
+        run: |
+          v="1.0.$(git rev-list --count HEAD)"
+          echo "Building Pagekeeper $v"
+          npx --yes @tauri-apps/cli@2 build --config "{\"version\":\"$v\"}"
 
       - name: Name the installer
         shell: bash

@@ -8,6 +8,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file limit
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
+const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
+const WHATS_NEW = { id: "player-popout-1", items: [
+  "<b>Full audio player:</b> open a book, tap the headphones. Drag the bar to skip anywhere, jump back or ahead, change speed from 0.5× to 3×, and set the volume.",
+  "<b>Pop-out text:</b> tap the window button at the top of a book. It floats on top of everything; pick its colors under <b>Aa</b>.",
+  "<b>Follow along:</b> Read aloud can highlight the sentence or the exact word. Choose under <b>Aa</b>.",
+  "<b>Discover:</b> search Project Gutenberg and LibriVox, or add your own repos, without leaving the app."
+] };
 const ICON = {
   back:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
   next:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>',
@@ -540,6 +547,7 @@ function render(){
     </header>
     ${!Cloud.signedIn() && S.view === "library" ? `<div class="banner"><span>Sign in to keep your iPhone and PC on the same page. Until then, everything stays on this device.</span><button class="btn" id="goSet">Set up sync</button></div>` : ""}
     ${S.busy ? `<div class="banner"><span>${S.busy}</span></div>` : ""}
+    ${S.view === "library" && prefs.get("seenNew") !== WHATS_NEW.id ? `<div class="banner whatsnew"><div><b>New in Pagekeeper ${esc(BUILD.version)}</b><ul>${WHATS_NEW.items.map(x => `<li>${x}</li>`).join("")}</ul></div><button class="btn" id="gotNew">Got it</button></div>` : ""}
     <div class="tabs" role="tablist">
       <button role="tab" data-tab="library" aria-selected="${S.view === "library"}">Library</button>
       <button role="tab" data-tab="find" aria-selected="${S.view === "find"}">Discover</button>
@@ -549,6 +557,7 @@ function render(){
   $("#addBtn").onclick = () => $("#bookFile").click();
   $("#syncBtn").onclick = () => { S.view = "settings"; render(); };
   const gs = $("#goSet"); if (gs) gs.onclick = () => { S.view = "settings"; render(); };
+  const gn = $("#gotNew"); if (gn) gn.onclick = () => { prefs.set("seenNew", WHATS_NEW.id); render(); };
   app.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { S.view = b.dataset.tab; render(); });
   if (S.view === "find") renderFind($("#body")); else if (S.view === "settings") renderSettings($("#body")); else renderLibraryBody();
 }
@@ -661,8 +670,20 @@ function renderSettings(el){
       <h3>This device</h3>
       <div class="form"><label for="devName">Name</label><input id="devName" type="text" maxlength="24" value="${esc(prefs.get("device"))}">
       <p class="note" style="margin:0">Shown on your other devices, like “page 12 on iPhone”.</p></div>
+    </div>
+    <div class="panel">
+      <h3>Pop-out text</h3>
+      <p class="note" style="margin:0">${TAURI ? "A borderless window that stays on top of everything else on your screen." : "A floating panel you can drag around inside Pagekeeper."} It shows the sentence being read aloud, or the page you're on. Change its colors and size from <b>Aa</b> while reading.</p>
+      <div class="row-btns"><button class="btn ${prefs.get("capOn") ? "" : "primary"}" id="setCap">${prefs.get("capOn") ? "Hide pop-out" : "Show pop-out"}</button></div>
+    </div>
+    <div class="panel">
+      <h3>About</h3>
+      <p class="note" style="margin:0">Pagekeeper ${esc(BUILD.version)}${BUILD.sha ? ` · build ${esc(BUILD.sha)}` : ""}${BUILD.date ? ` · ${esc(BUILD.date)}` : ""} · ${TAURI ? "Windows app" : IOS ? "iPhone app" : "web version"}</p>
+      <div class="row-btns"><button class="btn" id="showNew">What's new</button></div>
     </div>`;
   $("#devName").onchange = e => { const v = e.target.value.trim(); if (v) prefs.set("device", v); };
+  $("#setCap").onclick = () => { setCaption(!prefs.get("capOn")); renderSettings(el); };
+  $("#showNew").onclick = () => { prefs.set("seenNew", undefined); S.view = "library"; render(); };
   if (signed) {
     $("#syncNow").onclick = async () => { await syncNow(); renderSettings(el); toast(S.net === "ok" ? "Up to date." : S.net === "offline" ? "You're offline. Changes will sync later." : "Couldn't sync: " + esc(S.netMsg)); };
     $("#signOut").onclick = () => confirmBox("Sign out?", "Your books stay on this device, but stop syncing until you sign in again.", "Sign out", () => { Cloud.signOut(); setNet("local"); render(); });
@@ -1012,6 +1033,7 @@ function renderReader(){
     <div class="rbar">
       <button class="ib" id="rBack" aria-label="Back to library">${ICON.back}</button>
       <div class="rt"><b>${esc(b.title)}</b><span id="rPos"></span></div>
+      <button class="ib" id="rPop" aria-label="${prefs.get("capOn") ? "Hide" : "Show"} pop-out text" title="Pop-out text" aria-pressed="${!!prefs.get("capOn")}">${ICON.pop}</button>
       <button class="ib" id="rToc" aria-label="Contents">${ICON.list}</button>
       <button class="ib" id="rType" aria-label="Text settings">${ICON.type}</button>
       <button class="ib" id="rAudio" aria-label="Audio" aria-pressed="${S.dock}">${ICON.head}</button>
@@ -1033,7 +1055,19 @@ function renderReader(){
   $("#rSlide").onchange = e => goto(+e.target.value);
   $("#rToc").onclick = () => toggleSheet("toc");
   $("#rType").onclick = () => toggleSheet("type");
-  $("#rAudio").onclick = () => { S.dock = !S.dock; $("#rAudio").setAttribute("aria-pressed", S.dock); updateDock(); };
+  $("#rAudio").onclick = () => {
+    S.dock = !S.dock;
+    // With an audiobook, the headphones open the full player straight away.
+    if (S.dock) S.bigPlayer = !!(S.books[S.cur].audio && S.books[S.cur].audio.tracks && S.books[S.cur].audio.tracks.length);
+    $("#rAudio").setAttribute("aria-pressed", S.dock); updateDock();
+  };
+  $("#rPop").onclick = () => {
+    setCaption(!prefs.get("capOn"));
+    const on = !!prefs.get("capOn");
+    $("#rPop").setAttribute("aria-pressed", on); $("#rPop").setAttribute("aria-label", (on ? "Hide" : "Show") + " pop-out text");
+    toast(on ? (TAURI ? "Pop-out text is on. Drag it anywhere; change its colors under Aa." : "Pop-out text is on. Drag it around; change its colors under Aa.") : "Pop-out text is off.");
+    if (S.sheet === "type") renderSheet();
+  };
   const main = $("#rMain");
   let sx = 0, sy = 0;
   main.addEventListener("touchstart", e => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }, { passive: true });
@@ -1413,7 +1447,8 @@ Object.assign(ICON, {
   prev:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>',
   nextp:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>',
   vol:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM15.5 8.5a5 5 0 010 7M19 5a10 10 0 010 14"/></svg>',
-  mute:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM23 9l-6 6M17 9l6 6"/></svg>'
+  mute:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4zM23 9l-6 6M17 9l6 6"/></svg>',
+  pop:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="11" y="11" width="9" height="7" rx="1" fill="currentColor" stroke="none"/></svg>'
 });
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 const SKIPS = [10, 15, 30, 60];
