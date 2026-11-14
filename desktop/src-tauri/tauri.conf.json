@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pagekeeper",
+  "version": "1.0.0",
+  "identifier": "app.pagekeeper.reader",
+  "build": {
+    "frontendDist": "../../web"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Pagekeeper",
+        "width": 1200,
+        "height": 860,
+        "minWidth": 400,
+        "minHeight": 520,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Pagekeeper",
+    "shortDescription": "Books and audiobooks, synced",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

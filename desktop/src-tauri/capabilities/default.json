@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The reader window may listen for download progress. Website windows get nothing.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

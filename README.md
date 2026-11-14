@@ -61,8 +61,11 @@ If the IPA build fails, open the run and look at the red step; the last 40 lines
 
 ## 4. Use it on your PC
 
-Open `https://YOUR-USERNAME.github.io/pagekeeper/`, go to **Settings**, and sign in with the same email and password.
-In Chrome or Edge, click the install icon in the address bar to get a desktop app that also opens offline.
+**Windows app (recommended).** Every push also builds a Windows installer: **Actions** → **Build Windows app** → latest run → **Artifacts** → `Pagekeeper-Windows`. Unzip it and run `Pagekeeper-Setup.exe`. No admin rights are needed. Windows may say "Windows protected your PC" because the installer isn't code-signed; click **More info** → **Run anyway**. Pagekeeper then appears in your Start menu, opens offline, and has the same in-app browser and repos as the iPhone app.
+
+**Or in a browser.** Open `https://YOUR-USERNAME.github.io/pagekeeper/`. In Chrome or Edge you can click the install icon in the address bar.
+
+Either way, go to **Settings** and sign in with the same email and password as on your iPhone.
 
 **After both devices are signed in:** in Supabase open **Authentication → Sign In / Providers** and turn off **Allow new users to sign up**, so nobody else can make an account in your project.
 
@@ -89,6 +92,7 @@ In Chrome or Edge, click the install icon in the address bar to get a desktop ap
 web/                 the app (HTML/JS), used by both the iPhone app and the PC website
   config.js          your Supabase URL and anon key
 ios/                 the iPhone shell: loads web/ from inside the app, keeps audio playing in the background
+desktop/             the Windows app (Tauri): same reader, plus an in-app browser and direct downloads
   project.yml        XcodeGen spec; the GitHub build turns it into an Xcode project
 supabase/setup.sql   database table, storage bucket and privacy rules
 scripts/             fetches the PDF/EPUB libraries and draws the app icon

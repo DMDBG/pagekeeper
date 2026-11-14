@@ -10,3 +10,9 @@ ios/Payload/
 *.ipa
 .DS_Store
 web/__test/
+# Made by the Windows build
+desktop/src-tauri/target/
+desktop/src-tauri/icons/
+desktop/src-tauri/gen/
+desktop/src-tauri/Cargo.lock
+Pagekeeper-Setup.exe

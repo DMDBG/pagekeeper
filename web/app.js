@@ -696,9 +696,16 @@ function renderSettings(el){
 /* ---------- native bridge (iPhone app): downloads without leaving the app ---------- */
 const progressFns = {};
 window.pkProgress = (id, frac) => { const f = progressFns[id]; if (f) f(frac); };
+const IOS = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pk);
+const TAURI = window.__TAURI__ && window.__TAURI__.core ? window.__TAURI__ : null;   // the Windows app
 const Native = {
-  ok: !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pk),
-  call(msg){ return window.webkit.messageHandlers.pk.postMessage(msg); },
+  ok: IOS || !!TAURI,
+  call(msg){
+    if (IOS) return window.webkit.messageHandlers.pk.postMessage(msg);
+    const cmd = { text: "pk_text", file: "pk_file", done: "pk_done", browse: "pk_browse" }[msg.op];
+    const args = msg.op === "done" ? { token: msg.token } : msg.op === "file" ? { url: msg.url, id: msg.id || null } : { url: msg.url };
+    return TAURI.core.invoke(cmd, args).catch(e => { throw new Error(typeof e === "string" ? e : (e && e.message) || "That didn't work."); });
+  },
   async text(url){
     if (this.ok) { const r = await this.call({ op: "text", url }); if (r.status >= 400) throw new Error(`The catalog answered ${r.status}.`); return r; }
     const res = await fetch(url); if (!res.ok) throw new Error(`The catalog answered ${res.status}.`);
@@ -716,12 +723,31 @@ const Native = {
     return Object.assign(new File([blob], name, { type: blob.type }), { sourceUrl: url });
   },
   async take(info){
-    const r = await fetch("__dl/" + info.token); if (!r.ok) throw new Error("The download went missing. Try again.");
-    const blob = await r.blob(); this.call({ op: "done", token: info.token }).catch(() => {});
+    let blob;
+    if (TAURI) {
+      const bytes = await TAURI.core.invoke("pk_read", { token: info.token }).catch(e => { throw new Error(typeof e === "string" ? e : "The download went missing. Try again."); });
+      blob = new Blob([bytes], { type: info.type || "" });
+    } else {
+      const r = await fetch("__dl/" + info.token); if (!r.ok) throw new Error("The download went missing. Try again.");
+      blob = await r.blob();
+    }
+    this.call({ op: "done", token: info.token }).catch(() => {});
     return Object.assign(new File([blob], info.name, { type: info.type || blob.type }), { sourceUrl: info.url });
   },
   open(url){ if (this.ok) this.call({ op: "browse", url }).catch(() => {}); else window.open(url, "_blank", "noopener"); }
 };
+if (TAURI && TAURI.event) {
+  TAURI.event.listen("pk-progress", e => window.pkProgress(e.payload.id, e.payload.frac));
+  TAURI.event.listen("pk-received", e => window.pkReceived(e.payload));
+}
+/* In the apps, website links open in Pagekeeper's own browser instead of leaving the app. */
+document.addEventListener("click", e => {
+  const a = e.target.closest && e.target.closest("a[href]");
+  if (!a || !Native.ok || e.defaultPrevented) return;
+  if (!/^https?:/i.test(a.href)) return;
+  e.preventDefault();
+  Native.open(a.href);
+});
 const BOOK_EXT = /\.(epub|pdf|txt)$/i;
 function withExt(file, typeHint){
   if (BOOK_EXT.test(file.name)) return file;
