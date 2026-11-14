@@ -461,7 +461,7 @@ async function parseTxt(file){
   if (ch.blocks.length) chapters.push(ch);
   return { title: tm ? clean(tm[1]) : file.name.replace(/\.[^.]+$/, ""), author: am ? clean(am[1]) : "", chapters, cover: null };
 }
-async function importBook(file){
+async function importBook(file, opts = {}){
   const ext = (file.name.split(".").pop() || "").toLowerCase();
   if (["mobi","azw","azw3","kfx"].includes(ext)) { toast("Kindle files can't be opened. Convert a DRM-free copy to EPUB with Calibre, then add it."); return; }
   if (!["epub","pdf","txt"].includes(ext)) { toast("Choose an EPUB, PDF or TXT file."); return; }
@@ -488,14 +488,14 @@ async function importBook(file){
       S.content[id] = { kind: "text", ...pg };
     }
     await idb.put(id + ":book", payload);
-    const src = { name: file.name, size: file.size, fp: await fingerprint(file), url: "" };
+    const src = { name: file.name, size: file.size, fp: await fingerprint(file), url: safeUrl(opts.sourceUrl || "") };
     const fits = size <= MAX_FILE;
     save(id, { kind: "book", ...doc, asset: null, src, page: 1, pages: doc.pages, addedAt: Date.now(), audio: { tracks: [], track: 0, time: 0 } }, { now: true });
     if (fits && Cloud.signedIn()) queueUpload({ id, kind: "book", key: id + ":book", name, type });
     S.busy = null; render();
     const note = !Cloud.signedIn() ? "" : fits ? (navigator.onLine === false ? " It'll copy to your account when you're back online." : "") : " It's over 50 MB, so it stays on this device.";
     toast(`Added “${esc(doc.title)}”.${note}`, { label: "Read now", fn: () => openBook(id) });
-    if (!fits && Cloud.signedIn()) askBookLink(id);
+    if (!fits && Cloud.signedIn() && !src.url) askBookLink(id);
   } catch (e) {
     console.warn(e); S.busy = null; render();
     toast(esc(e.message || "That file couldn't be read."));
@@ -542,7 +542,7 @@ function render(){
     ${S.busy ? `<div class="banner"><span>${S.busy}</span></div>` : ""}
     <div class="tabs" role="tablist">
       <button role="tab" data-tab="library" aria-selected="${S.view === "library"}">Library</button>
-      <button role="tab" data-tab="find" aria-selected="${S.view === "find"}">Find books</button>
+      <button role="tab" data-tab="find" aria-selected="${S.view === "find"}">Discover</button>
       <button role="tab" data-tab="settings" aria-selected="${S.view === "settings"}">Settings</button>
     </div>
     <div id="body"></div></div>`;
@@ -554,7 +554,7 @@ function render(){
 }
 function renderLibraryBody(){
   const el = $("#body"); if (!el || S.view !== "library") return;
-  const list = Object.entries(S.books).filter(([, b]) => !b.deleted).sort((a, b) => (b[1].updatedAt || b[1].addedAt || 0) - (a[1].updatedAt || a[1].addedAt || 0));
+  const list = Object.entries(S.books).filter(([, b]) => !b.deleted && b.kind === "book").sort((a, b) => (b[1].updatedAt || b[1].addedAt || 0) - (a[1].updatedAt || a[1].addedAt || 0));
   const recent = list.find(([, b]) => !b.builtin && b.updatedAt && b.page > 1) || list.find(([, b]) => b.updatedAt && (b.page || 1) > 1);
   let html = "";
   if (recent) {
@@ -613,7 +613,7 @@ function removeBook(id){
     if (Cloud.signedIn()) for (const p of paths) Files.del(p).catch(() => {});
   });
 }
-function renderFind(el){
+function renderSites(el){
   const q = S.findQ, enc = encodeURIComponent(q);
   const books = [
     ["Project Gutenberg", "More than 70,000 free classics whose copyright has expired. Pick “EPUB3” on a book's page.", `https://www.gutenberg.org/ebooks/search/?query=${enc}`],
@@ -626,15 +626,12 @@ function renderFind(el){
     ["Lit2Go", "Free classic stories and poems with matching MP3 audio.", `https://etc.usf.edu/lit2go/search/?q=${enc}`],
     ["Your own purchases", "DRM-free audiobooks you've bought (for example from Libro.fm) can be added as MP3 or M4B files.", "https://libro.fm/"]
   ];
-  const card = ([t, d, u]) => `<div class="src"><h3>${t}</h3><p>${d}</p><div class="row"><a href="${esc(u)}" target="_blank" rel="noopener">${q ? `Search for “${esc(q)}”` : "Open"} ↗</a></div></div>`;
+  const card = ([t, d, u]) => `<div class="src"><h3>${t}</h3><p>${d}</p><div class="row"><a href="${esc(u)}" target="_blank" rel="noopener">${q ? `Search for “${esc(q)}”` : "Open"} ${Native.ok ? "" : "↗"}</a></div></div>`;
   el.innerHTML = `
-    <form class="find-search" id="fs"><input id="findQ" type="search" placeholder="Title or author, e.g. Frankenstein" value="${esc(q)}" aria-label="Title or author"><button class="btn primary">Search</button></form>
-    <h2 class="sec">Free ebooks</h2><div class="srcs">${books.map(card).join("")}</div>
-    <h2 class="sec">Free audiobooks</h2><div class="srcs">${audio.map(card).join("")}</div>
-    <h2 class="sec">How to add what you find</h2>
-    <ol class="steps"><li>Download the EPUB (or PDF). On iPhone it lands in the Files app, in Downloads.</li><li>Come back and tap <b>Add book</b>. It's now on your iPhone and PC.</li><li>For audio, open the book, tap the headphones, and add the MP3s or the LibriVox zip.</li></ol>
-    <p class="note" style="margin-top:18px;max-width:65ch">These sources share books legally. For newer books, try your public library's free Libby app or buy a DRM-free copy, then add the file here.</p>`;
-  $("#fs").onsubmit = e => { e.preventDefault(); S.findQ = $("#findQ").value.trim(); renderFind(el); };
+    <h2 class="sec">Websites</h2>
+    <p class="note" style="margin:-4px 0 12px;max-width:65ch">${Native.ok ? "These open inside Pagekeeper. Anything you download there goes straight into your library." : "These open in a new tab. Download the file, then tap Add book."}</p>
+    <div class="srcs">${books.map(card).join("")}${audio.map(card).join("")}</div>
+    <p class="note" style="max-width:65ch">For newer books, try your public library's free Libby app or buy a DRM-free copy, then add the file here.</p>`;
 }
 function renderSettings(el){
   const signed = Cloud.signedIn();
@@ -684,7 +681,7 @@ function renderSettings(el){
       if (mode === "up") { const r = await Cloud.signUp(email, pw); if (r === "confirm") { errEl.textContent = "Check your email and tap the confirmation link, then sign in here."; errEl.hidden = false; return; } }
       else await Cloud.signIn(email, pw);
       for (const [id, b] of Object.entries(S.books)) if (!b.builtin || b.updatedAt) S.dirty.set(id, ++rev);
-      for (const [id, b] of Object.entries(S.books)) if (!b.deleted && !b.asset && !b.builtin && !S.uploads.some(u => u.id === id && u.kind === "book")) {
+      for (const [id, b] of Object.entries(S.books)) if (b.kind === "book" && !b.deleted && !b.asset && !b.builtin &&!S.uploads.some(u => u.id === id && u.kind === "book")) {
         if (!b.src || b.src.size <= MAX_FILE) S.uploads.push({ id, kind: "book", key: id + ":book", name: b.format === "pdf" ? "book.pdf" : "book.json", type: b.format === "pdf" ? "application/pdf" : "application/json" });
       }
       persist(); toast("Signed in. Syncing your library…"); render(); syncNow();
@@ -694,6 +691,281 @@ function renderSettings(el){
   };
   $("#authForm").onsubmit = e => { e.preventDefault(); go("in"); };
   $("#signUp").onclick = () => go("up");
+}
+
+/* ---------- native bridge (iPhone app): downloads without leaving the app ---------- */
+const progressFns = {};
+window.pkProgress = (id, frac) => { const f = progressFns[id]; if (f) f(frac); };
+const Native = {
+  ok: !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pk),
+  call(msg){ return window.webkit.messageHandlers.pk.postMessage(msg); },
+  async text(url){
+    if (this.ok) { const r = await this.call({ op: "text", url }); if (r.status >= 400) throw new Error(`The catalog answered ${r.status}.`); return r; }
+    const res = await fetch(url); if (!res.ok) throw new Error(`The catalog answered ${res.status}.`);
+    return { text: await res.text(), url: res.url || url };
+  },
+  async file(url, onProgress){
+    if (this.ok) {
+      const id = "p" + Math.random().toString(36).slice(2); if (onProgress) progressFns[id] = onProgress;
+      try { return await this.take(await this.call({ op: "file", url, id })); } finally { delete progressFns[id]; }
+    }
+    const res = await fetch(url); if (!res.ok) throw new Error(`The site answered ${res.status}.`);
+    const blob = await res.blob();
+    const cd = res.headers.get("content-disposition") || ""; const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i);
+    const name = m ? decodeURIComponent(m[1]) : decodeURIComponent((res.url || url).split("?")[0].split("/").pop() || "download");
+    return Object.assign(new File([blob], name, { type: blob.type }), { sourceUrl: url });
+  },
+  async take(info){
+    const r = await fetch("__dl/" + info.token); if (!r.ok) throw new Error("The download went missing. Try again.");
+    const blob = await r.blob(); this.call({ op: "done", token: info.token }).catch(() => {});
+    return Object.assign(new File([blob], info.name, { type: info.type || blob.type }), { sourceUrl: info.url });
+  },
+  open(url){ if (this.ok) this.call({ op: "browse", url }).catch(() => {}); else window.open(url, "_blank", "noopener"); }
+};
+const BOOK_EXT = /\.(epub|pdf|txt)$/i;
+function withExt(file, typeHint){
+  if (BOOK_EXT.test(file.name)) return file;
+  const ext = { "application/epub+zip": "epub", "application/pdf": "pdf", "text/plain": "txt" }[String(typeHint || file.type || "").split(";")[0].trim()];
+  if (!ext) return file;
+  return Object.assign(new File([file], file.name.replace(/\.[^.]*$/, "") + "." + ext, { type: file.type }), { sourceUrl: file.sourceUrl });
+}
+function progressToast(msg){
+  const t = document.querySelector(".toast[data-p] span");
+  if (t) t.innerHTML = msg; else { toast(msg, null, 600000); const n = document.querySelector(".toast"); if (n) n.dataset.p = "1"; }
+}
+/* Pick which book an audiobook belongs to. */
+function pickBook(title, note, onPick){
+  const books = Object.entries(S.books).filter(([, b]) => b.kind === "book" && !b.deleted && !b.builtin)
+    .sort((a, b) => (b[1].updatedAt || b[1].addedAt || 0) - (a[1].updatedAt || a[1].addedAt || 0));
+  const m = document.createElement("div"); m.className = "modal-back";
+  m.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>${esc(title)}</h3><p>${note}</p>
+    <div style="display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow:auto">
+      ${books.length ? books.map(([id, b]) => `<button class="btn" data-pick="${id}" style="justify-content:flex-start;text-align:left">${esc(b.title)}${b.author ? `<span class="note" style="font-weight:400"> · ${esc(b.author)}</span>` : ""}</button>`).join("")
+        : `<p>Your library has no books yet. Add the ebook first (Project Gutenberg has most LibriVox titles), then add the audio to it.</p>`}
+    </div><div class="row"><button class="btn" data-x>Cancel</button></div></div>`;
+  m.addEventListener("click", e => {
+    if (e.target === m || e.target.closest("[data-x]")) m.remove();
+    const p = e.target.closest("[data-pick]"); if (p) { m.remove(); onPick(p.dataset.pick); }
+  });
+  document.body.append(m);
+}
+/* Files downloaded in the in-app browser arrive here. */
+window.pkReceived = async info => {
+  let file;
+  try { file = await Native.take(info); } catch (e) { toast(esc(e.message)); return; }
+  file = withExt(file, info.type);
+  const ext = extOf(file.name);
+  if (S.awaitingRelink && S.books[S.awaitingRelink] && BOOK_EXT.test(file.name)) { const id = S.awaitingRelink; S.awaitingRelink = null; return relinkWith(id, file); }
+  if (BOOK_EXT.test(file.name) || ["mobi", "azw", "azw3"].includes(ext)) return importBook(file, { sourceUrl: info.url });
+  if (AUDIO_EXT.test(file.name) || ext === "zip") {
+    const target = S.awaitingAudio && S.books[S.awaitingAudio] ? S.awaitingAudio : null;
+    if (target && notHere(target).some(t => !t.asset)) return matchAudio([file], target);
+    return pickBook("Which book is this audio for?", esc(file.name), id => addAudio([file], id).catch(() => toast("Those files couldn't be added.")));
+  }
+  toast("Pagekeeper can't open that kind of file. Look for EPUB, PDF, TXT or MP3.");
+};
+
+/* ---------- Discover: repos (OPDS catalogs), LibriVox, websites ---------- */
+const BUILTIN_REPOS = [
+  { id: "gutenberg", name: "Project Gutenberg", desc: "More than 70,000 free classics whose copyright has expired.", url: "https://www.gutenberg.org/ebooks.opds/", search: "https://www.gutenberg.org/ebooks/search.opds/?query={searchTerms}", builtin: true },
+  { id: "librivox", name: "LibriVox audiobooks", desc: "Free public-domain audiobooks read by volunteers. Adds the MP3s straight to a book.", type: "librivox", builtin: true }
+];
+const allRepos = () => [...BUILTIN_REPOS, ...((S.books.__repos && S.books.__repos.list) || [])];
+const rerenderFind = () => { if (S.view === "find") renderFind($("#body")); };
+function renderFind(el){
+  if (!el) return;
+  if (S.disc) return renderCatalog(el);
+  const repos = allRepos();
+  el.innerHTML = `
+    <h2 class="sec">Repos</h2>
+    <div class="srcs">
+      ${repos.map(r => `<div class="src"><h3>${esc(r.name)}</h3><p style="word-break:break-word">${esc(r.desc || r.url)}</p>
+        <div class="row"><button class="btn primary" data-repo="${esc(r.id)}">Browse</button>${r.builtin ? "" : `<button class="btn" data-rm="${esc(r.id)}">Remove</button>`}</div></div>`).join("")}
+      <div class="src"><h3>Add a repo</h3><p>Paste the address of an OPDS catalog, the format libraries and ebook stores use to share their shelves. Your own Calibre library works too. Repos you add show up on all your devices.</p>
+        <div class="row"><button class="btn" id="addRepo">${ICON.plus} Add repo</button></div></div>
+    </div>
+    ${Native.ok ? "" : `<p class="note" style="margin:-12px 0 22px;max-width:65ch">Some repos block browsing from a PC browser. They all work in the iPhone app.</p>`}
+    <div id="sites"></div>`;
+  renderSites($("#sites", el));
+  el.querySelectorAll("[data-repo]").forEach(b => b.onclick = () => openRepo(b.dataset.repo));
+  el.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => {
+    const list = (S.books.__repos?.list || []).filter(r => r.id !== b.dataset.rm);
+    save("__repos", { kind: "repos", list }); rerenderFind();
+  });
+  $("#addRepo").onclick = () => linkBox("Add a repo", "Paste the OPDS catalog address. It usually ends in <code>/opds</code> or <code>.xml</code>.", "", async u => {
+    if (!u) return;
+    progressToast("Checking the repo…");
+    try {
+      const r = await Native.text(u); const f = parseOPDS(r.text, r.url);
+      const list = [...(S.books.__repos?.list || []), { id: "r" + Date.now().toString(36), name: f.title || new URL(u).host, url: u, desc: u }];
+      save("__repos", { kind: "repos", list }); clearToasts(); toast(`Added “${esc(f.title || "repo")}”.`); rerenderFind();
+    } catch (e) { clearToasts(); toast(esc(friendlyNetError(e))); }
+  });
+}
+function friendlyNetError(e){
+  if (e instanceof TypeError && !Native.ok) return "Your browser blocked this site. Try it in the iPhone app.";
+  if (e instanceof TypeError || /offline|internet|network/i.test(e.message)) return "Couldn't connect. Check your internet connection.";
+  return e.message || "Something went wrong.";
+}
+function openRepo(id){
+  const repo = allRepos().find(r => r.id === id); if (!repo) return;
+  S.disc = { repo, stack: [], entries: [], next: null, loading: false, error: "", q: "" };
+  if (repo.type === "librivox") { rerenderFind(); return; }
+  S.disc.stack.push({ url: repo.url, title: repo.name });
+  loadFeed();
+}
+async function loadFeed(append){
+  const d = S.disc; if (!d) return; const top = d.stack[d.stack.length - 1];
+  d.loading = true; d.error = ""; if (!append) { d.entries = []; d.next = null; }
+  rerenderFind();
+  try {
+    const r = await Native.text(append ? d.next : top.url);
+    const f = parseOPDS(r.text, r.url);
+    if (S.disc !== d) return;
+    d.entries = append ? d.entries.concat(f.entries) : f.entries;
+    d.next = f.next || null;
+    if (!append) { d.title = f.title || top.title; if (f.search && !d.searchLink) d.searchLink = f.search; }
+  } catch (e) { d.error = friendlyNetError(e); }
+  d.loading = false; rerenderFind();
+}
+function parseOPDS(xml, base){
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const feed = doc.documentElement;
+  if (doc.getElementsByTagName("parsererror").length || !feed || feed.localName !== "feed") throw new Error("That address isn't an OPDS catalog.");
+  const abs = h => { try { return h ? new URL(h, base).href : null; } catch { return null; } };
+  const kids = (el, name) => [...el.children].filter(c => c.localName === name);
+  const txt = (el, name) => clean(kids(el, name)[0]?.textContent);
+  const links = el => kids(el, "link").map(l => ({ rel: l.getAttribute("rel") || "", type: (l.getAttribute("type") || "").toLowerCase(), href: abs(l.getAttribute("href")), title: l.getAttribute("title") || "" })).filter(l => l.href);
+  const fl = links(feed);
+  const entries = kids(feed, "entry").map(e => {
+    const L = links(e);
+    const acq = L.filter(l => /opds-spec\.org\/acquisition(\/open-access)?$/.test(l.rel) || l.rel === "http://opds-spec.org/acquisition");
+    const formats = [];
+    for (const [type, label] of [["application/epub+zip", "EPUB"], ["application/pdf", "PDF"], ["text/plain", "TXT"]]) {
+      const all = acq.filter(a => a.type.startsWith(type));
+      // Prefer the newest, illustrated edition when a catalog offers several (e.g. Gutenberg's EPUB3 with images).
+      const l = all.find(a => /epub3/i.test(a.href + a.title) && !/no ?images/i.test(a.href + a.title)) || all.find(a => !/no ?images/i.test(a.href + a.title)) || all[0];
+      if (l) formats.push({ label, type, href: l.href });
+    }
+    const nav = !acq.length ? (L.find(l => /atom\+xml/.test(l.type) && !/acquisition|image|alternate/.test(l.rel)) || L.find(l => /atom\+xml/.test(l.type))) : null;
+    const img = L.find(l => /opds-spec\.org\/image\/thumbnail/.test(l.rel)) || L.find(l => /opds-spec\.org\/image$/.test(l.rel));
+    const authors = kids(e, "author").map(a => txt(a, "name")).filter(Boolean).join(", ");
+    return { title: txt(e, "title") || "Untitled", authors, summary: (txt(e, "summary") || txt(e, "content")).slice(0, 220), formats, nav: nav && nav.href, img: img && img.href, otherOnly: !!acq.length && !formats.length };
+  });
+  const search = fl.find(l => l.rel === "search");
+  return { title: txt(feed, "title"), entries, next: fl.find(l => l.rel === "next")?.href, search };
+}
+async function searchUrl(d, q){
+  let t = d.repo.search;
+  if (!t && d.searchLink) {
+    if (/opensearchdescription/.test(d.searchLink.type)) {
+      const r = await Native.text(d.searchLink.href);
+      const x = new DOMParser().parseFromString(r.text, "application/xml");
+      const urls = [...x.getElementsByTagNameNS("*", "Url")];
+      const u = urls.find(u => /atom/.test(u.getAttribute("type") || "")) || urls[0];
+      t = u ? new URL(u.getAttribute("template"), r.url).href : null;
+    } else t = d.searchLink.href;
+  }
+  if (!t) return null;
+  return t.replace(/\{searchTerms\}|%7BsearchTerms%7D/gi, encodeURIComponent(q)).replace(/\{[^}]*\?\}|%7B[^%]*%3F%7D/gi, "");
+}
+function renderCatalog(el){
+  const d = S.disc, lv = d.repo.type === "librivox";
+  const canSearch = lv || d.repo.search || d.searchLink;
+  const depth = d.stack.length;
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+      <button class="btn" id="dBack">${ICON.back} ${depth > 1 ? "Back" : "Repos"}</button>
+      <h2 style="margin:0;font-size:18px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(lv ? d.repo.name : (d.title || d.repo.name))}</h2>
+    </div>
+    ${canSearch ? `<form class="find-search" id="dSearch"><input id="dQ" type="search" placeholder="${lv ? "Title or author, e.g. Frankenstein" : "Search this repo"}" value="${esc(d.q)}" aria-label="Search"><button class="btn primary">Search</button></form>` : ""}
+    <div id="dList">${
+      d.error ? `<div class="banner"><span>${esc(d.error)}</span><button class="btn" id="dRetry">Try again</button></div>`
+      : d.loading && !d.entries.length ? `<p class="note">Loading…</p>`
+      : !d.entries.length ? `<p class="note">${lv ? "Search for a book to find its free audiobook." : "Nothing here."}</p>`
+      : d.entries.map((x, i) => entryHTML(x, i, lv)).join("")}
+    </div>
+    ${d.next && !d.error ? `<button class="btn" id="dMore" ${d.loading ? "disabled" : ""}>${d.loading ? "Loading…" : "More"}</button>` : ""}`;
+  $("#dBack").onclick = () => { if (d.stack.length > 1) { d.stack.pop(); d.searchMode = false; loadFeed(); } else { S.disc = null; rerenderFind(); } };
+  const form = $("#dSearch");
+  if (form) form.onsubmit = async e => {
+    e.preventDefault(); const q = $("#dQ").value.trim(); if (!q) return; d.q = q;
+    if (lv) return librivoxSearch(q);
+    try { const u = await searchUrl(d, q); if (!u) { toast("This repo doesn't support search."); return; }
+      d.stack = [d.stack[0], { url: u, title: `“${q}”` }]; loadFeed(); }
+    catch (err) { toast(esc(friendlyNetError(err))); }
+  };
+  const rt = $("#dRetry"); if (rt) rt.onclick = () => lv ? librivoxSearch(d.q) : loadFeed();
+  const more = $("#dMore"); if (more) more.onclick = () => loadFeed(true);
+  el.querySelectorAll("[data-nav]").forEach(b => b.onclick = () => { const x = d.entries[+b.dataset.nav]; d.stack.push({ url: x.nav, title: x.title }); loadFeed(); });
+  el.querySelectorAll("[data-get]").forEach(b => b.onclick = () => { const [i, f] = b.dataset.get.split(":").map(Number); const x = d.entries[i]; getBook(x.formats[f], x); });
+  el.querySelectorAll("[data-lv]").forEach(b => b.onclick = () => librivoxAdd(d.entries[+b.dataset.lv]));
+}
+function entryHTML(x, i, lv){
+  const img = x.img ? `<img src="${esc(x.img)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="ph" style="background:hsl(${hue(x.title)} 40% 40%)"></div>`;
+  const actions = lv ? `<button class="btn primary" data-lv="${i}">${ICON.head} Add audio to a book</button>`
+    : x.formats.length ? x.formats.map((f, k) => `<button class="btn ${k ? "" : "primary"}" data-get="${i}:${k}">${ICON.down} ${f.label}</button>`).join("")
+    : x.nav ? `<button class="btn" data-nav="${i}">Open ${ICON.next}</button>`
+    : x.otherOnly ? `<span class="note">Only in formats Pagekeeper can't open.</span>` : "";
+  return `<div class="entry">${img}<div class="e-body"><b>${esc(x.title)}</b>${x.authors ? `<span class="note">${esc(x.authors)}</span>` : ""}${x.summary ? `<span class="e-sum">${esc(x.summary)}</span>` : ""}<div class="row-btns">${actions}</div></div></div>`;
+}
+async function getBook(fmt, entry){
+  progressToast(`Downloading “${esc(entry.title)}”…`);
+  try {
+    let f = await Native.file(fmt.href, p => progressToast(`Downloading “${esc(entry.title)}”… ${Math.round(p * 100)}%`));
+    f = withExt(f, fmt.type); clearToasts();
+    await importBook(f, { sourceUrl: fmt.href });
+  } catch (e) {
+    clearToasts();
+    if (!Native.ok) { toast("Your browser blocked the download, so its page is opening instead. Download it there, then tap Add book.", null, 8000); window.open(fmt.href, "_blank", "noopener"); }
+    else toast(esc(friendlyNetError(e)));
+  }
+}
+/* LibriVox recordings live on the Internet Archive, which has open search and file APIs. */
+async function librivoxSearch(q){
+  const d = S.disc; d.loading = true; d.error = ""; d.entries = []; rerenderFind();
+  const term = q.replace(/[():"]/g, " ").trim();
+  const query = `collection:(librivoxaudio) AND (title:(${term}) OR creator:(${term}))`;
+  const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}&fl[]=identifier&fl[]=title&fl[]=creator&rows=30&sort[]=downloads+desc&output=json`;
+  try {
+    const r = await Native.text(url); const j = JSON.parse(r.text);
+    if (S.disc !== d) return;
+    d.entries = (j.response?.docs || []).map(x => ({ id: x.identifier, title: clean(String(x.title || x.identifier)), authors: [].concat(x.creator || []).join(", "), img: `https://archive.org/services/img/${encodeURIComponent(x.identifier)}` }));
+  } catch (e) { d.error = friendlyNetError(e); }
+  d.loading = false; rerenderFind();
+}
+async function librivoxAdd(x){
+  progressToast("Looking up the recording…");
+  let files;
+  try {
+    const r = await Native.text(`https://archive.org/metadata/${encodeURIComponent(x.id)}/files`);
+    const all = JSON.parse(r.text).result || [];
+    let mp3 = all.filter(f => f.format === "64Kbps MP3");
+    if (!mp3.length) mp3 = all.filter(f => /MP3/.test(f.format || "") && !/_64kb\.mp3$/.test(f.name));
+    files = mp3.sort((a, b) => (parseInt(a.track) || 0) - (parseInt(b.track) || 0) || natural(a.name, b.name));
+  } catch (e) { clearToasts(); toast(esc(friendlyNetError(e))); return; }
+  clearToasts();
+  if (!files.length) { toast("This recording has no MP3 files."); return; }
+  const size = files.reduce((n, f) => n + (+f.size || 0), 0);
+  pickBook("Add this audiobook to which book?", `${esc(x.title)} · ${files.length} part${files.length > 1 ? "s" : ""}${size ? `, ${esc(fmtSize(size))}` : ""}. It downloads once and then plays offline.`, async id => {
+    const book = S.books[id];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const url = `https://archive.org/download/${encodeURIComponent(x.id)}/${f.name.split("/").map(encodeURIComponent).join("/")}`;
+      const label = `Downloading part ${i + 1} of ${files.length} for “${esc(book.title)}”`;
+      progressToast(label + "…");
+      try {
+        let file = await Native.file(url, p => progressToast(`${label}… ${Math.round(p * 100)}%`));
+        if (!AUDIO_EXT.test(file.name)) file = new File([file], f.name.split("/").pop(), { type: "audio/mpeg" });
+        await addAudio([file], id, true);
+      } catch (e) {
+        clearToasts(); toast(`Stopped at part ${i + 1}: ${esc(friendlyNetError(e))}`, null, 8000); return;
+      }
+    }
+    if (S.books[id].audio && !S.books[id].audio.url) save(id, { audio: { url: `https://archive.org/details/${x.id}` } });
+    clearToasts();
+    toast(`Audiobook added to “${esc(book.title)}”.`, { label: "Open book", fn: () => { openBook(id); S.dock = true; updateDock(); } }, 8000);
+  });
 }
 
 /* ---------- reader ---------- */
@@ -786,13 +1058,20 @@ function renderMissing(main, id, failed){
     <p>This book was added on ${esc(b.device || "another device")}${big ? ` and is too big to copy to your account (${esc(fmtSize(src.size))})` : " and hasn't finished uploading yet"}. ${big ? "Download the exact same file, then choose it. Your page stays the same." : "Wait for it to sync, or choose the same file here."}</p>
     ${src.name ? `<div class="filebox">File: <b>${esc(src.name)}</b>${src.size ? `<br>Size: ${esc(fmtSize(src.size))} (${src.size.toLocaleString()} bytes)` : ""}</div>` : ""}
     <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
-      ${src.url ? `<a class="btn primary" href="${esc(src.url)}" target="_blank" rel="noopener">1. Download the same file ↗</a>` : ""}
-      <button class="btn ${src.url ? "" : "primary"}" id="relink">${src.url ? "2. " : ""}Choose the downloaded file</button>
+      ${src.url && Native.ok ? `<button class="btn primary" id="dlHere">${ICON.down} Download it here</button><a class="btn" href="${esc(src.url)}" target="_blank" rel="noopener" data-await-book>Open the download page</a>`
+        : src.url ? `<a class="btn primary" href="${esc(src.url)}" target="_blank" rel="noopener" data-await-book>1. Download the same file ↗</a>` : ""}
+      <button class="btn ${src.url ? "" : "primary"}" id="relink">${src.url && !Native.ok ? "2. " : ""}Choose the downloaded file</button>
     </div>
     ${src.url ? `<p style="font-size:12.5px">On iPhone, downloads go to the Files app, in Downloads.</p>`
       : `<p style="font-size:12.5px">No download link was saved for this book. <button class="btn ghost" id="addLink" style="padding:4px 6px;color:var(--accent)">Add the link</button></p>`}
   </div>`;
   $("#relink").onclick = () => $("#relinkFile").click();
+  main.querySelectorAll("[data-await-book]").forEach(a => a.addEventListener("click", () => { S.awaitingRelink = id; }));
+  const dh = $("#dlHere"); if (dh) dh.onclick = async () => {
+    progressToast("Downloading…");
+    try { const f = withExt(await Native.file(src.url, p => progressToast(`Downloading… ${Math.round(p * 100)}%`))); clearToasts(); relinkWith(id, f); }
+    catch (e) { clearToasts(); toast(esc(friendlyNetError(e)) + " You can also open the download page and download it there.", null, 8000); }
+  };
   const al = $("#addLink"); if (al) al.onclick = () => linkBox("Where can this book be downloaded?", "Paste the page or link where you got it. Every device then shows a download button for this file.", "", u => { save(id, { src: { ...src, url: u } }); showPage(); });
 }
 function updateReaderChrome(){
@@ -862,9 +1141,9 @@ async function expandZips(files){
   }
   return list.sort((a, c) => natural(a.name, c.name));
 }
-async function addAudio(files){
-  const id = S.cur, b = S.books[id]; if (!b) return;
-  toast("Getting the audio ready…", null, 60000);
+async function addAudio(files, id = S.cur, quiet = false){
+  const b = S.books[id]; if (!b) return;
+  if (!quiet) toast("Getting the audio ready…", null, 60000);
   const list = await expandZips(files);
   if (!list.length) { toast("No audio files found. Use MP3, M4A, M4B or a zip of them."); return; }
   const tracks = [...(b.audio?.tracks || [])];
@@ -879,6 +1158,7 @@ async function addAudio(files){
   }
   const fresh = !(b.audio?.tracks || []).length;
   save(id, { audio: fresh ? { tracks, track: 0, time: 0 } : { tracks } }, { now: true });
+  if (quiet) { if (S.cur === id) updateDock(); return; }
   clearToasts();
   toast(big && Cloud.signedIn() ? `Added. ${big} file${big > 1 ? "s are" : " is"} over 50 MB and stay${big > 1 ? "" : "s"} on this device; your listening spot still syncs.` : Cloud.signedIn() ? "Audio added. It's copying to your account." : "Audio added.");
   auBook = null; updateDock();
@@ -894,8 +1174,8 @@ async function checkLocal(id){
   await Promise.all(tracks.map(async t => { if (S.haveLocal[t.key] === undefined) S.haveLocal[t.key] = !!(await idb.get(t.key)); }));
 }
 const notHere = id => (S.books[id]?.audio?.tracks || []).filter(t => S.haveLocal[t.key] === false);
-async function matchAudio(files){
-  const id = S.cur; if (!S.books[id]) return;
+async function matchAudio(files, id = S.cur){
+  if (!S.books[id]) return;
   toast("Checking the files…", null, 60000);
   const list = await expandZips(files);
   const missing = notHere(id).filter(t => !t.asset); let matched = 0;
@@ -1040,7 +1320,7 @@ function updateDock(){
     if (gone.length) note += `<div class="missbox"><span><b>${gone.length} of ${tracks.length} part${tracks.length > 1 ? "s" : ""} aren't on this device</b> (${esc(fmtSize(gone.reduce((n, x) => n + (x.size || 0), 0)))}). Download the exact same files, then add them here. Your listening spot is kept.</span>
         <span style="color:var(--pmuted);word-break:break-all">${gone.slice(0, 4).map(x => esc(x.file || x.name) + " · " + esc(fmtSize(x.size))).join("<br>")}${gone.length > 4 ? `<br>…and ${gone.length - 4} more` : ""}</span>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          ${aurl ? `<a class="btn primary" href="${esc(aurl)}" target="_blank" rel="noopener">1. Download the same files ↗</a>` : `<button class="btn" id="auLink">Add download link</button>`}
+          ${aurl ? `<a class="btn primary" href="${esc(aurl)}" target="_blank" rel="noopener" data-await-audio>1. Download the same files${Native.ok ? "" : " ↗"}</a>` : `<button class="btn" id="auLink">Add download link</button>`}
           <button class="btn ${aurl ? "" : "primary"}" id="auMatch">${aurl ? "2. " : ""}Add matching files</button></div></div>`;
     if (cloudOnly.length) note += `<div class="missbox"><span>${cloudOnly.length} part${cloudOnly.length > 1 ? "s are" : " is"} in your account but not downloaded here (${esc(fmtSize(cloudOnly.reduce((n, x) => n + (x.size || 0), 0)))}).</span>
         <div><button class="btn" id="auDl">${ICON.down} Download for offline</button></div></div>`;
@@ -1064,6 +1344,7 @@ function updateDock(){
     $("#auRate").onchange = e => { prefs.set("rate", +e.target.value); au.playbackRate = +e.target.value; };
     $("#auList").onclick = () => { S.showTracks = !S.showTracks; updateDock(); };
     const am = $("#auMatch"); if (am) am.onclick = () => $("#matchFile").click();
+    el.querySelectorAll("[data-await-audio]").forEach(a => a.addEventListener("click", () => { S.awaitingAudio = S.cur; }));
     const dl = $("#auDl"); if (dl) dl.onclick = downloadAll;
     ["#auLink", "#auLink2"].forEach(s => { const x = $(s); if (x) x.onclick = () => askAudioLink(S.cur); });
     el.querySelectorAll("[data-t]").forEach(x => x.onclick = async () => { const i = +x.dataset.t; if (await loadTrack(i, 0)) { save(S.cur, { audio: { track: i, time: 0 } }); au.play().catch(() => {}); } });
@@ -1082,9 +1363,9 @@ function updateDock(){
 $("#bookFile").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) importBook(f); };
 $("#audioFile").onchange = e => { const fs = [...e.target.files]; e.target.value = ""; if (fs.length) addAudio(fs).catch(err => { console.warn(err); clearToasts(); toast("Those files couldn't be added."); }); };
 $("#matchFile").onchange = e => { const fs = [...e.target.files]; e.target.value = ""; if (fs.length) matchAudio(fs).catch(err => { console.warn(err); clearToasts(); toast("Those files couldn't be checked."); }); };
-$("#relinkFile").onchange = async e => {
-  const f = e.target.files[0]; e.target.value = ""; if (!f || !S.cur) return;
-  const id = S.cur, b = S.books[id];
+$("#relinkFile").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f && S.cur) relinkWith(S.cur, f); };
+async function relinkWith(id, f){
+  const b = S.books[id]; if (!b) return;
   const want = b.src?.fp;
   if (want) {
     toast("Checking the file…", null, 20000);
@@ -1096,7 +1377,7 @@ $("#relinkFile").onchange = async e => {
     }
   }
   attachFile(id, f, !!want);
-};
+}
 async function attachFile(id, f, verified){
   const b = S.books[id];
   try {
