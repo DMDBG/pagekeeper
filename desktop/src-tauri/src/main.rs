@@ -10,6 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 #[derive(Serialize, Clone)]
 struct FileInfo {
@@ -261,8 +262,25 @@ async fn pk_caption(app: AppHandle, show: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The play/pause key, working even while another app is in front. None turns it off.
+#[tauri::command]
+fn pk_hotkey(app: AppHandle, keys: Option<String>) -> Result<(), String> {
+    let gs = app.global_shortcut();
+    gs.unregister_all().map_err(|e| e.to_string())?;
+    if let Some(k) = keys {
+        gs.on_shortcut(k.as_str(), |app, _shortcut, event| {
+            if event.state == ShortcutState::Pressed {
+                let _ = app.emit_to("main", "pk-hotkey", ());
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             // Closing the main window quits Pagekeeper, pop-out and browser windows included.
             if window.label() == "main" {
@@ -278,7 +296,7 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption])
+        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption, pk_hotkey])
         .run(tauri::generate_context!())
         .expect("error while running Pagekeeper");
 }

@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark" style="background:#0E1218">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Pagekeeper</title>
-<meta name="theme-color" content="#2F55C4">
+<meta name="theme-color" content="#0E1218">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Pagekeeper">
@@ -142,7 +142,7 @@ ol.steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;m
 .sheet{position:absolute;left:0;right:0;bottom:0;background:var(--pbar);border-top:1px solid var(--pline);border-radius:16px 16px 0 0;padding:16px max(18px,env(safe-area-inset-right,0px)) calc(16px + env(safe-area-inset-bottom,0px)) max(18px,env(safe-area-inset-left,0px));box-shadow:0 -10px 30px rgba(0,0,0,.18);max-height:70%;overflow:auto;font-family:var(--ui);z-index:3}
 .sheet h3{margin:0 0 12px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
 .seg{display:flex;gap:8px;flex-wrap:wrap}
-.seg button{border:1px solid var(--pline);border-radius:10px;padding:8px 14px;background:transparent}
+.seg button{border:1px solid var(--pline,var(--line));color:inherit;border-radius:10px;padding:8px 14px;background:transparent}
 .seg button[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
 .field{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
 .field label{font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--pmuted)}
@@ -220,6 +220,11 @@ input.scrub:active::-webkit-slider-thumb{transform:scale(1.2)}
 .reader[data-paper="sepia"]{--hl:rgba(160,110,40,.2);--hlsoft:rgba(160,110,40,.1);--hlw:rgba(245,185,65,.7)}
 .reader[data-paper="night"]{--hl:rgba(138,166,255,.22);--hlsoft:rgba(138,166,255,.1);--hlw:rgba(245,185,65,.38)}
 .page .hl{background:var(--hl);border-radius:4px;-webkit-box-decoration-break:clone;box-decoration-break:clone;transition:background .15s}
+.fpill{position:fixed;left:50%;transform:translateX(-50%);top:calc(62px + env(safe-area-inset-top,0px));z-index:30;display:flex;gap:10px;align-items:center;max-width:calc(100% - 32px);background:var(--pbar,var(--surface));color:var(--pink,var(--ink));border:1px solid var(--pline,var(--line));border-radius:999px;padding:5px 5px 5px 14px;font-size:14px;box-shadow:0 8px 26px rgba(0,0,0,.28)}
+.fpill .btn{padding:6px 12px;border-radius:999px}
+.fnote{margin:-4px 0 6px;font-size:12.5px}
+kbd.keycap{font:600 14px var(--ui);border:1px solid var(--line);border-bottom-width:3px;border-radius:8px;padding:6px 12px;background:var(--bg);min-width:64px;text-align:center}
+label.check{display:flex;gap:8px;align-items:center;font-size:14px;cursor:pointer}
 .page .hl.soft{background:var(--hlsoft)}
 .page mark.w{background:var(--hlw);color:inherit;border-radius:3px;padding:0 1px}
 .missbox{background:var(--pline);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:13px;display:flex;flex-direction:column;gap:8px}

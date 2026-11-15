@@ -104,6 +104,13 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
             setVolume(max(0, min(1, v)))
             replyHandler(true, nil)
 
+        case "theme":
+            // Dark, light, or follow the phone: sets the status bar and the in-app browser to match.
+            let mode = body["mode"] as? String ?? "dark"
+            let style: UIUserInterfaceStyle = mode == "light" ? .light : mode == "system" ? .unspecified : .dark
+            webView?.window?.overrideUserInterfaceStyle = style
+            replyHandler(true, nil)
+
         case "volumeGet":
             setUpVolume()
             replyHandler(Double(AVAudioSession.sharedInstance().outputVolume), nil)

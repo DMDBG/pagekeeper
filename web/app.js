@@ -9,7 +9,10 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "player-popout-2", items: [
+const WHATS_NEW = { id: "follow-dark-3", items: [
+  "<b>Dark mode</b> is now on everywhere. Change it in Settings under Look.",
+  "<b>Audiobooks follow along:</b> as your own audiobook plays, the pages turn and the sentence is highlighted. If it drifts, tap <b>Line up</b> in the player, then the sentence you're hearing.",
+  "<b>Play/pause key:</b> pick any key in Settings. On Windows it can work even while you're in another app.",
   "<b>Player for every book:</b> tap the headphones in any book. Without an audiobook it reads aloud: pause, skip a sentence, drag to any sentence, and change speed, volume and voice.",
   "<b>Audiobooks:</b> the same player with a scrubber, skip back and ahead, speed from 0.5× to 3×, and volume. Switch between Audiobook and Read aloud at the top.",
   "<b>Pop-out text:</b> tap the window button at the top of a book. \"Just text\" floats the words on your screen with no box; use Invert to swap the colors. Settings are under <b>Aa</b>.",
@@ -40,10 +43,24 @@ const prefs = (() => {
   try { p = JSON.parse(localStorage.getItem("pk-prefs") || "{}"); } catch {}
   const isPhone = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   p.device ||= isPhone ? "Phone" : "PC";
-  p.paper ||= "paper";
+  // Dark is the default look. Older installs switch over once; after that it's your choice in Settings.
+  if (!p.themeV) { p.themeV = 1; p.theme = "dark"; if (!p.paper || p.paper === "paper") p.paper = "night"; try { localStorage.setItem("pk-prefs", JSON.stringify(p)); } catch {} }
+  p.paper ||= "night";
   p.fs ||= isPhone ? 18 : 20;
   return { get: k => p[k], set(k, v){ if (v === undefined) delete p[k]; else p[k] = v; try { localStorage.setItem("pk-prefs", JSON.stringify(p)); } catch {} } };
 })();
+
+function applyTheme(){
+  const t = prefs.get("theme") || "dark";
+  if (t === "system") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+  const dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+  const m = document.querySelector('meta[name="theme-color"]'); if (m) m.content = dark ? "#0E1218" : "#F3F5F8";
+  document.documentElement.style.background = dark ? "#0E1218" : "#F3F5F8";
+  // iPhone app: match the status bar and system screens to the look.
+  try { const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pk; if (h) Promise.resolve(h.postMessage({ op: "theme", mode: t })).catch(() => {}); } catch {}
+}
+applyTheme();
+try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme); } catch {}
 
 /* ---------- IndexedDB: library, sync queues, book files and audio ---------- */
 const idb = (() => {
@@ -668,6 +685,20 @@ function renderSettings(el){
         </form>`}
     </div>
     <div class="panel">
+      <h3>Look</h3>
+      <div class="seg">${[["dark","Dark"],["light","Light"],["system","Match device"]].map(([k, l]) => `<button data-theme-pick="${k}" aria-pressed="${(prefs.get("theme") || "dark") === k}">${l}</button>`).join("")}</div>
+      <p class="note" style="margin:0">The page color while reading (white, sepia or night) is under <b>Aa</b> in a book.</p>
+    </div>
+    <div class="panel">
+      <h3>Play / pause key</h3>
+      <div class="row-btns" style="align-items:center"><kbd class="keycap" id="keyShow">${esc(keyLabel(keyPlay()))}</kbd>
+        <button class="btn" id="keySet">${S.keyRecording ? "Press a key… (Esc cancels)" : "Change"}</button>
+        ${prefs.get("keyPlay") ? `<button class="btn ghost" id="keyReset">Use Space</button>` : ""}</div>
+      <p class="note" style="margin:0">Starts and pauses the audiobook or Read aloud${IOS ? " (with a keyboard connected to your iPhone)" : ""}.</p>
+      ${TAURI ? `<label class="check"><input type="checkbox" id="keyGlobal" ${prefs.get("keyGlobal") ? "checked" : ""}> Also works when you're in another app</label>
+      <p class="note" style="margin:0">For that, the key needs Ctrl, Alt or Shift with it (like Ctrl + Shift + Space), or use an F key, so it doesn't get in the way of typing elsewhere.</p>` : ""}
+    </div>
+    <div class="panel">
       <h3>This device</h3>
       <div class="form"><label for="devName">Name</label><input id="devName" type="text" maxlength="24" value="${esc(prefs.get("device"))}">
       <p class="note" style="margin:0">Shown on your other devices, like “page 12 on iPhone”.</p></div>
@@ -682,6 +713,29 @@ function renderSettings(el){
       <p class="note" style="margin:0">Pagekeeper ${esc(BUILD.version)}${BUILD.sha ? ` · build ${esc(BUILD.sha)}` : ""}${BUILD.date ? ` · ${esc(BUILD.date)}` : ""} · ${TAURI ? "Windows app" : IOS ? "iPhone app" : "web version"}</p>
       <div class="row-btns"><button class="btn" id="showNew">What's new</button></div>
     </div>`;
+  el.querySelectorAll("[data-theme-pick]").forEach(b => b.onclick = () => { prefs.set("theme", b.dataset.themePick); applyTheme(); renderSettings(el); });
+  $("#keySet").onclick = () => {
+    S.keyRecording = !S.keyRecording; renderSettings(el);
+    if (!S.keyRecording) { document.removeEventListener("keydown", S.keyGrab, true); return; }
+    const grab = e => {
+      if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
+      e.preventDefault(); e.stopPropagation(); document.removeEventListener("keydown", grab, true);
+      S.keyRecording = false;
+      if (e.key !== "Escape") {
+        const k = { code: e.code, key: e.key, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey };
+        if (TAURI && prefs.get("keyGlobal") && !globalOk(k)) { prefs.set("keyGlobal", false); toast("Saved. It works inside Pagekeeper; add Ctrl, Alt or Shift (or use an F key) to use it in other apps too.", null, 7000); }
+        prefs.set("keyPlay", k); setGlobalKey();
+      }
+      renderSettings(el);
+    };
+    S.keyGrab = grab;
+    document.addEventListener("keydown", grab, true);
+  };
+  const kr = $("#keyReset"); if (kr) kr.onclick = () => { prefs.set("keyPlay", undefined); if (prefs.get("keyGlobal")) prefs.set("keyGlobal", false); setGlobalKey(); renderSettings(el); };
+  const kg = $("#keyGlobal"); if (kg) kg.onchange = () => {
+    if (kg.checked && !globalOk(keyPlay())) { kg.checked = false; toast("Pick a key with Ctrl, Alt or Shift first (or an F key), then turn this on.", null, 6000); return; }
+    prefs.set("keyGlobal", kg.checked); setGlobalKey();
+  };
   $("#devName").onchange = e => { const v = e.target.value.trim(); if (v) prefs.set("device", v); };
   $("#setCap").onclick = () => { setCaption(!prefs.get("capOn")); renderSettings(el); };
   $("#showNew").onclick = () => { prefs.set("seenNew", undefined); S.view = "library"; render(); };
@@ -1022,6 +1076,7 @@ async function openBook(id){
   S.cur = id; S.view = "reader"; S.sheet = null; S.page = Math.max(1, S.books[id].page || 1);
   stopReadAloud();
   S.dock = false; S.reading = false; S.playerMode = null; TTS.idx = 0; TTS.count = 0;
+  S.followHold = false; S.syncPick = false; fLast.page = 0; fLast.el = null;
   renderReader(); await showPage();
 }
 function closeReader(){
@@ -1050,6 +1105,7 @@ function renderReader(){
     </div>
     <div id="sheet"></div>
   </div>`;
+  setTimeout(updateFollowPill, 0);
   $("#rBack").onclick = closeReader;
   $("#rPrev").onclick = () => goto(S.page - 1);
   $("#rNext").onclick = () => goto(S.page + 1);
@@ -1076,6 +1132,7 @@ function renderReader(){
   main.addEventListener("touchend", e => { const dx = e.changedTouches[0].clientX - sx, dy = e.changedTouches[0].clientY - sy;
     if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) goto(S.page + (dx < 0 ? 1 : -1)); });
   main.addEventListener("click", e => {
+    if (S.syncPick && !e.target.closest("button,a,input")) { followPick(e); return; }
     if (e.target.closest("button,a,input")) return;
     if (window.getSelection && String(window.getSelection())) return;
     const r = main.getBoundingClientRect(); const x = e.clientX - r.left;
@@ -1096,7 +1153,7 @@ async function showPage(){
   if (c.kind === "text") {
     const blocks = c.pages[S.page - 1];
     // Each sentence is its own span so read-aloud can highlight it.
-    const sentences = x => (x.match(/[^.!?…]+[.!?…]+["'”’)\]]*\s*|[^.!?…]+$/g) || [x]).map(s => `<span data-s>${esc(s)}</span>`).join("");
+    const sentences = x => splitS(x).map(s => `<span data-s>${esc(s)}</span>`).join("");
     main.innerHTML = `<article class="page">${blocks.map(([t, x]) => t === "h" ? `<h2><span data-s>${esc(x)}</span></h2>` : `<p>${sentences(x)}</p>`).join("")}<div class="pno">${S.page}</div></article>`;
   } else {
     main.innerHTML = `<div class="pdfwrap"><canvas id="pdfc"></canvas></div>`;
@@ -1156,16 +1213,19 @@ async function goto(n, fromRemote, fromTts){
   save(S.cur, { page: n, pages: T });
   if (S.sheet === "toc") renderSheet();
   if (!fromTts) TTS.idx = 0;
+  if (!fromRemote && !fromTts && followActive()) S.followHold = true;
   await showPage();
+  updateFollowPill();
   // Turning the page yourself while it reads aloud: keep reading from the top of the new page.
   if (!fromTts && S.reading && !TTS.paused) ttsStart(0);
   else if (S.dock && playerMode() === "tts") updateTtsUI();
 }
 document.addEventListener("keydown", e => {
+  if (S.view !== "reader" && !S.keyRecording && !e.target.closest("input,select,textarea,button") && auBook && keyMatch(e, keyPlay())) { e.preventDefault(); playPauseAny(); return; }
   if (S.view !== "reader" || e.target.closest("input,select,textarea")) return;
   if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); goto(S.page + 1); }
   else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); goto(S.page - 1); }
-  else if (e.key === " " && S.dock && !e.target.closest("button")) { e.preventDefault(); togglePlay(); }
+  else if (keyMatch(e, keyPlay()) && !(e.code === "Space" && e.target.closest("button"))) { e.preventDefault(); playPauseAny(); }
   else if (e.key === "Escape") { if (S.sheet) toggleSheet(S.sheet); else if (S.bigPlayer) { S.bigPlayer = false; updateDock(); } else closeReader(); }
 });
 function toggleSheet(name){ S.sheet = S.sheet === name ? null : name; renderSheet(); }
@@ -1368,9 +1428,11 @@ function saveAudioPos(force){
   auSaveAt = now;
   save(auBook.id, { audio: { track: auBook.track, time: t } });
 }
-au.addEventListener("timeupdate", () => { saveAudioPos(false); updateTimes(); });
-au.addEventListener("loadedmetadata", () => updateTimes());
-au.addEventListener("play", updateDock); au.addEventListener("pause", () => { saveAudioPos(true); updateDock(); });
+au.addEventListener("timeupdate", () => { saveAudioPos(false); updateTimes(); followTick(false); });
+au.addEventListener("loadedmetadata", () => { updateTimes(); const b = auBook && S.books[auBook.id], t = b && b.audio.tracks[auBook.track]; if (t) setDur(t.key, au.duration); });
+au.addEventListener("seeked", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } followTick(true); });
+au.addEventListener("play", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } updateDock(); followTick(true); });
+au.addEventListener("pause", () => { saveAudioPos(true); updateDock(); followStopCap(); updateFollowPill(); });
 au.addEventListener("ended", async () => {
   const b = auBook && S.books[auBook.id]; if (!b) return;
   const nxt = auBook.track + 1;
@@ -1727,6 +1789,7 @@ function updateDock(){
         ${speedRow(rate)}
         ${volRow}
         <div class="pl-row"><label>Skip</label><div class="chips">${SKIPS.map(s => `<button class="chip" data-skip="${s}" aria-pressed="${s === sk}">${s} sec</button>`).join("")}</div></div>
+        ${followRow(b)}
         <div class="pl-row"><label>Parts</label><button class="btn" id="auList">${S.showTracks ? "Hide parts" : `Show all ${tracks.length}`}</button></div>
         ${list}
         ${popRow}
@@ -1759,6 +1822,16 @@ function updateDock(){
     const dl = $("#auDl"); if (dl) dl.onclick = downloadAll;
     ["#auLink", "#auLink2"].forEach(s => { const x = $(s); if (x) x.onclick = () => askAudioLink(S.cur); });
     el.querySelectorAll("[data-t]").forEach(x => x.onclick = async () => { const i = +x.dataset.t; if (await loadTrack(i, 0)) { save(S.cur, { audio: { track: i, time: 0 } }); au.play().catch(() => {}); } updateDock(); });
+    el.querySelectorAll("[data-follow]").forEach(x => x.onclick = () => {
+      prefs.set("follow", x.dataset.follow === "1");
+      if (!followOn()) { clearHighlights(); fLast.el = null; followStopCap(); S.followHold = false; updateFollowPill(); } else followTick(true);
+      updateDock();
+    });
+    const fl = $("#fLine"); if (fl) fl.onclick = async () => {
+      if (!(await ensureLoaded())) return;
+      S.syncPick = true; S.bigPlayer = false; updateDock(); updateFollowPill();
+    };
+    const fr = $("#fReset"); if (fr) fr.onclick = () => confirmBox("Reset the line-ups?", "Follow along goes back to its first estimate for this book, on every device.", "Reset", () => { save(S.cur, { follow: { pts: [] } }); updateDock(); followTick(true); });
     const clr = $("#auClear"); if (clr) clr.onclick = () => confirmBox("Remove the audiobook?", "The audio files for this book will be removed from every device. The book itself stays.", "Remove audio", async () => {
       au.pause(); au.removeAttribute("src"); auBook = null;
       const id = S.cur; S.uploads = S.uploads.filter(u => !(u.id === id && u.kind === "track"));
@@ -1781,6 +1854,153 @@ function updateDock(){
   const add = $("#auAdd"); if (add) add.onclick = () => $("#audioFile").click();
   paintVol();
 }
+
+/* ---------- follow along with an audiobook ----------
+   An MP3 or M4B has no text inside it, so Pagekeeper estimates: how far you are through all the audio
+   is matched to how far you are through the book's text. Each "line up" (you tap the sentence you're
+   hearing) pins that moment exactly, and the stretch between line-ups is spread evenly.
+   Line-ups are saved with the book, so they sync to your other devices. */
+const splitS = x => x.match(SENT_RE) || [x];   // the same sentences the page shows
+const followOn = () => prefs.get("follow") !== false;
+const followActive = () => !!(followOn() && auBook && auBook.id === S.cur && !au.paused && S.books[S.cur]?.audio?.tracks?.length);
+const durCache = (() => { try { return JSON.parse(localStorage.getItem("pk-durs") || "{}"); } catch { return {}; } })();
+function setDur(key, d){
+  if (!key || !isFinite(d) || d <= 0 || durCache[key] === d) return;
+  durCache[key] = d; try { localStorage.setItem("pk-durs", JSON.stringify(durCache)); } catch {}
+}
+const durTried = new Set();
+async function measureDurs(b){
+  for (const t of b.audio.tracks) {
+    if (durCache[t.key] || durTried.has(t.key)) continue;
+    durTried.add(t.key);
+    const blob = await idb.get(t.key); if (!blob) continue;
+    const u = URL.createObjectURL(blob); const a = new Audio(); a.preload = "metadata";
+    await new Promise(r => { a.onloadedmetadata = r; a.onerror = r; setTimeout(r, 8000); a.src = u; });
+    setDur(t.key, a.duration); a.removeAttribute("src"); URL.revokeObjectURL(u);
+  }
+}
+// Lengths of every part. Parts not measured yet are estimated from their file size.
+function trackDurs(b){
+  const tr = b.audio.tracks; let kd = 0, ks = 0;
+  for (const t of tr) if (durCache[t.key] && t.size) { kd += durCache[t.key]; ks += t.size; }
+  const perByte = ks ? kd / ks : 1 / 16000;   // about 128 kbps until we know better
+  return tr.map(t => durCache[t.key] || (t.size ? t.size * perByte : 0) || 1800);
+}
+function textIndex(c){
+  if (c._fi) return c._fi;
+  if (c.kind !== "text") return (c._fi = { starts: null, total: c.total || 1 });
+  const starts = []; let n = 0;
+  for (const blocks of c.pages) { starts.push(n); for (const [t, x] of blocks) n += t === "h" ? x.length : splitS(x).reduce((a, q) => a + q.length, 0); }
+  return (c._fi = { starts, total: n || 1 });
+}
+function audioClock(b){
+  const D = trackDurs(b); const off = [0]; for (const d of D) off.push(off[off.length - 1] + d);
+  return { off, total: off[D.length] };
+}
+function mapFrac(pts, at, totalA){
+  const P = [[0, 0], ...pts.filter(p => p[0] > 0 && p[0] < totalA).sort((x, y) => x[0] - y[0]), [totalA, 1]];
+  for (let i = 1; i < P.length; i++) if (at <= P[i][0]) {
+    const [a0, f0] = P[i - 1], [a1, f1] = P[i];
+    return Math.min(1, Math.max(0, f0 + (f1 - f0) * (a1 > a0 ? (at - a0) / (a1 - a0) : 0)));
+  }
+  return 1;
+}
+const fLast = { page: 0, el: null, busy: false };
+async function followTick(force){
+  if (S.view !== "reader" || !followOn() || S.followHold || S.syncPick || fLast.busy) return;
+  const b = S.books[S.cur];
+  if (!auBook || auBook.id !== S.cur || !b?.audio?.tracks?.length) return;
+  if (au.paused && !force) return;
+  const now = Date.now(); if (!force && now - (followTick.t || 0) < 600) return; followTick.t = now;
+  const c = S.content[S.cur]; if (!c) return;
+  measureDurs(b);
+  const { off, total: totalA } = audioClock(b);
+  const at = off[auBook.track] + (au.currentTime || 0);
+  const pts = ((b.follow && b.follow.pts) || []).map(([ti, t, f]) => [(off[ti] ?? off[off.length - 1]) + t, f]);
+  const frac = mapFrac(pts, at, totalA);
+  const ix = textIndex(c);
+  let page, inPage = 0;
+  if (!ix.starts) page = Math.min(ix.total, Math.floor(frac * ix.total) + 1);
+  else {
+    const pos = frac * ix.total; let lo = 0, hi = ix.starts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (ix.starts[mid] <= pos) lo = mid; else hi = mid - 1; }
+    page = lo + 1; inPage = pos - ix.starts[lo];
+  }
+  if (page !== S.page) { fLast.busy = true; try { await goto(page, false, "follow"); } finally { fLast.busy = false; } }
+  if (!ix.starts) return;
+  if (fLast.page !== S.page) { fLast.page = S.page; fLast.el = null; }
+  let n = 0, hit = null;
+  for (const sp of document.querySelectorAll(".page [data-s]")) { n += sp.textContent.length; hit = sp; if (n > inPage) break; }
+  if (!hit || hit === fLast.el) return;
+  if (fLast.el) clearHighlight(fLast.el);
+  fLast.el = hit;
+  if ((prefs.get("hl") || "sentence") !== "off") {
+    hit.classList.add("hl");
+    const m = $("#rMain"), r = hit.getBoundingClientRect(), mr = m && m.getBoundingClientRect();
+    if (mr && (r.top < mr.top + 40 || r.bottom > mr.bottom - 40)) hit.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+  if (!au.paused) { capNow.speaking = true; capNow.follow = true; capNow.text = hit.textContent.trim(); capNow.word = null; capSend(); }
+}
+function followStopCap(){ if (capNow.follow) { capNow.follow = false; capNow.speaking = false; capSend(); } }
+function followPick(e){
+  const b = S.books[S.cur], c = S.content[S.cur];
+  if (!auBook || auBook.id !== S.cur || !c) { S.syncPick = false; updateFollowPill(); return; }
+  const ix = textIndex(c); let frac;
+  if (ix.starts) {
+    const sp = e.target.closest("[data-s]");
+    if (!sp) { toast("Tap the sentence you're hearing."); return; }
+    let n = 0; for (const x of document.querySelectorAll(".page [data-s]")) { if (x === sp) break; n += x.textContent.length; }
+    frac = (ix.starts[S.page - 1] + n) / ix.total;
+  } else frac = (S.page - 1) / ix.total;
+  const { off } = audioClock(b);
+  const g = (ti, t) => (off[ti] ?? 0) + t;
+  const nt = au.currentTime || 0, na = g(auBook.track, nt);
+  // Keep the other line-ups that still agree with this one (earlier audio = earlier text), and drop any within 20 seconds.
+  const kept = ((b.follow && b.follow.pts) || []).filter(([ti, t, f]) => { const a = g(ti, t); return Math.abs(a - na) > 20 && (a < na ? f <= frac : f >= frac); });
+  const pts = [...kept, [auBook.track, Math.round(nt * 10) / 10, Math.round(frac * 1e6) / 1e6]].sort((x, y) => g(x[0], x[1]) - g(y[0], y[1]));
+  save(S.cur, { follow: { pts } });
+  S.syncPick = false; S.followHold = false; fLast.el = null; updateFollowPill();
+  toast(pts.length > 1 ? `Lined up. ${pts.length} line-ups in this book.` : "Lined up. Do it again later in the book if it drifts.");
+  followTick(true);
+}
+function followRow(b){
+  const on = followOn(), n = ((b.follow && b.follow.pts) || []).length;
+  return `<div class="pl-row"><label>Follow</label><div class="chips"><button class="chip" data-follow="1" aria-pressed="${on}">On</button><button class="chip" data-follow="0" aria-pressed="${!on}">Off</button></div>
+    ${on ? `<button class="btn" id="fLine">Line up</button>${n ? `<button class="btn ghost" id="fReset">Reset ${n} line-up${n > 1 ? "s" : ""}</button>` : ""}` : ""}</div>
+    ${on ? `<p class="note fnote">Turns the pages and highlights the sentence as the audiobook plays. It starts as an estimate. If it's off, tap <b>Line up</b> while it plays, then tap the sentence you're hearing. A few line-ups through the book keep it close all the way.</p>` : ""}`;
+}
+function updateFollowPill(){
+  const r = $(".reader"); let el = $("#followPill");
+  let html = "";
+  if (r && S.syncPick) html = `<span>Tap the sentence you're hearing now</span><button class="btn ghost" id="fpCancel">Cancel</button>`;
+  else if (r && S.followHold && followActive()) html = `<span>The audio is somewhere else</span><button class="btn primary" id="fpBack">Back to the audio</button>`;
+  if (!html) { if (el) el.remove(); return; }
+  if (!el) { el = document.createElement("div"); el.id = "followPill"; el.className = "fpill"; r.appendChild(el); }
+  el.innerHTML = html;
+  const cx = $("#fpCancel"); if (cx) cx.onclick = () => { S.syncPick = false; updateFollowPill(); followTick(true); };
+  const bk = $("#fpBack"); if (bk) bk.onclick = () => { S.followHold = false; updateFollowPill(); followTick(true); };
+}
+
+/* ---------- play / pause key ---------- */
+const keyPlay = () => prefs.get("keyPlay") || { code: "Space", key: " " };
+function keyLabel(k){
+  const name = k.code === "Space" ? "Space" : /^Key[A-Z]$/.test(k.code) ? k.code.slice(3) : /^Digit\d$/.test(k.code) ? k.code.slice(5) : k.code.replace(/^Arrow/, "Arrow ");
+  return [k.ctrl && "Ctrl", k.alt && "Alt", k.shift && "Shift", k.meta && (IOS ? "Cmd" : "Win"), name].filter(Boolean).join(" + ");
+}
+const keyMatch = (e, k) => e.code === k.code && !!e.ctrlKey === !!k.ctrl && !!e.altKey === !!k.alt && !!e.shiftKey === !!k.shift && !!e.metaKey === !!k.meta;
+const globalOk = k => !!(k.ctrl || k.alt || k.shift || k.meta) || /^F\d+$/.test(k.code) || /^Media/.test(k.code);
+function setGlobalKey(){
+  if (!TAURI) return;
+  const k = keyPlay();
+  const accel = prefs.get("keyGlobal") && globalOk(k) ? [k.ctrl && "Ctrl", k.alt && "Alt", k.shift && "Shift", k.meta && "Super", k.code].filter(Boolean).join("+") : null;
+  TAURI.core.invoke("pk_hotkey", { keys: accel }).catch(e => { console.warn(e); if (accel) toast("Windows wouldn't let Pagekeeper use that key in other apps. Another program may already use it; try a different one.", null, 7000); });
+}
+function playPauseAny(){
+  if (S.view === "reader" && S.cur) {
+    if (playerMode() === "tts") ttsPlayPause(); else togglePlay();
+  } else if (auBook) { if (au.paused) au.play().catch(() => {}); else au.pause(); }
+}
+if (TAURI) { TAURI.event.listen("pk-hotkey", () => playPauseAny()); setTimeout(setGlobalKey, 0); }
 
 /* ---------- pop-out text ----------
    Windows app: a borderless, always-on-top window you drag anywhere on screen.

@@ -15,7 +15,7 @@ struct PagekeeperApp: App {
         WindowGroup {
             ReaderWebView()
                 .ignoresSafeArea()
-                .background(Color(red: 0.95, green: 0.96, blue: 0.97))
+                .background(Color(red: 0.055, green: 0.071, blue: 0.094))
         }
     }
 }
