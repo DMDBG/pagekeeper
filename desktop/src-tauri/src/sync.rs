@@ -404,8 +404,8 @@ fn recognize(exe: &Path, model: &Path, work: &Path, pcm: &[i16], segs: &[(usize,
     }
     let bytes = std::fs::read(&json).map_err(|_| "The speech engine didn't write any words.".to_string())?;
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&bytes)).map_err(|e| e.to_string())?;
-    if let Some(segs) = v["transcription"].as_array() {
-        for seg in segs {
+    if let Some(items) = v["transcription"].as_array() {
+        for seg in items {
             let text = seg["text"].as_str().unwrap_or("").trim();
             if text.is_empty() {
                 continue;
