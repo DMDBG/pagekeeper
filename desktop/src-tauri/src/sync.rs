@@ -1,8 +1,8 @@
 // Automatic follow-along for your own audiobooks, done entirely on this PC.
 // Each audiobook part is decoded to plain 16 kHz speech audio, then whisper.cpp (an open-source
 // speech recognizer bundled with the app) writes down the words with the time they were spoken.
-// To keep long books quick, it only listens to the first 30 seconds of every two minutes; the
-// rest is skipped without even being decoded, and the reader page fills in between.
+// It listens to the whole book, with several copies of the recognizer working side by side, so the
+// timing is exact for every sentence.
 // The reader page matches those words to the book's text and saves a small timing map that
 // syncs to your other devices. Nothing is uploaded anywhere for this.
 use futures_util::StreamExt;
@@ -12,6 +12,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
@@ -28,11 +29,15 @@ const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/ma
 const OLD_MODEL: &str = "ggml-base.en.bin"; // the larger model earlier versions used
 const MODEL_MIN: u64 = 60_000_000; // the real file is about 75 MB
 const RATE: u32 = 16_000;
-const CHUNK_SECS: usize = 300; // never hand the recognizer more than five minutes at once
-const WINDOW_SECS: f64 = 30.0; // listen to this much...
-const PERIOD_SECS: f64 = 120.0; // ...out of every this much
-const WINDOWS_PER_RUN: usize = 6; // listening windows sent to the recognizer together
-const GAP: usize = RATE as usize / 2; // half a second of silence between windows
+const CHUNK_SECS: usize = 180; // each copy of the recognizer takes three minutes at a time
+
+/// What the recognizer heard in one audio file: each word with the time it was spoken
+/// (milliseconds from the start), and the pauses.
+#[derive(Serialize)]
+pub struct Heard {
+    words: Vec<(u32, String)>,
+    gaps: Vec<(u32, u32)>,
+}
 
 #[derive(Serialize)]
 pub struct SyncStatus {
@@ -182,7 +187,7 @@ pub fn pk_put_chunk(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<
 
 /// Turn one received audio file into words with their times (milliseconds from the start).
 #[tauri::command]
-pub async fn pk_transcribe(app: AppHandle, file: String) -> Result<Vec<(u32, String)>, String> {
+pub async fn pk_transcribe(app: AppHandle, file: String) -> Result<Heard, String> {
     safe_file(&file)?;
     let src = work_dir(&app)?.join(&file);
     let app2 = app.clone();
@@ -193,7 +198,7 @@ pub async fn pk_transcribe(app: AppHandle, file: String) -> Result<Vec<(u32, Str
     result
 }
 
-fn transcribe(app: &AppHandle, src: &Path) -> Result<Vec<(u32, String)>, String> {
+fn transcribe(app: &AppHandle, src: &Path) -> Result<Heard, String> {
     let exe = whisper_exe(app)?;
     if !model_ready(app) {
         return Err("The speech model isn't downloaded yet.".to_string());
@@ -206,7 +211,7 @@ fn transcribe(app: &AppHandle, src: &Path) -> Result<Vec<(u32, String)>, String>
     out
 }
 
-fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, src: &Path) -> Result<Vec<(u32, String)>, String> {
+fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, src: &Path) -> Result<Heard, String> {
     let file = File::open(src).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -225,112 +230,176 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
     let tid = track.id;
     let sr = track.codec_params.sample_rate.unwrap_or(44_100).max(1) as u64;
     let total_secs = track.codec_params.n_frames.map(|n| n as f64 / sr as f64).unwrap_or(0.0);
-    let tb = track.codec_params.time_base;
     let mut dec = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|_| "This audio format can't be read for syncing.".to_string())?;
 
-    let mut words: Vec<(u32, String)> = Vec::new();
+    // Several copies of the recognizer work at once, each on its own stretch of the audio:
+    // on a PC with many cores that's much faster than one copy using them all.
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let workers = (cores / 4).clamp(1, 5);
+    let threads = (cores / workers).clamp(1, 4);
+    let abort = Arc::new(AtomicBool::new(false));
+    let (job_tx, job_rx) = mpsc::sync_channel::<(usize, f64, PathBuf)>(workers);
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let (res_tx, res_rx) = mpsc::channel::<(usize, Result<Vec<(u32, String)>, String>)>();
+    let mut pool = Vec::new();
+    for _ in 0..workers {
+        let (rx, tx, abort) = (job_rx.clone(), res_tx.clone(), abort.clone());
+        let (exe, model, work) = (exe.to_path_buf(), model.to_path_buf(), work.to_path_buf());
+        pool.push(std::thread::spawn(move || loop {
+            let job = match rx.lock() {
+                Ok(r) => r.recv(),
+                Err(_) => break,
+            };
+            let Ok((i, start, wav)) = job else { break };
+            let out = recognize(&exe, &model, &work, &wav, i, start, threads, &abort);
+            let _ = std::fs::remove_file(&wav);
+            if tx.send((i, out)).is_err() {
+                break;
+            }
+        }));
+    }
+    drop(res_tx);
+
+    let mut results: Vec<Option<Vec<(u32, String)>>> = Vec::new();
+    let (mut sent, mut done) = (0usize, 0usize);
+    let expected = if total_secs > 0.0 { (total_secs / CHUNK_SECS as f64).ceil() as usize } else { 0 };
+    let mut collect = |r: (usize, Result<Vec<(u32, String)>, String>), done: &mut usize, results: &mut Vec<Option<Vec<(u32, String)>>>| -> Result<(), String> {
+        let (i, words) = r;
+        let words = words?;
+        if results.len() <= i {
+            results.resize(i + 1, None);
+        }
+        results[i] = Some(words);
+        *done += 1;
+        let _ = app.emit("pk-sync-progress", Progress { stage: "listen", frac: (*done as f64 / expected.max(*done + 1) as f64).min(0.99) });
+        Ok(())
+    };
+    let fail = |e: String, abort: &Arc<AtomicBool>| -> String {
+        abort.store(true, Ordering::SeqCst);
+        e
+    };
+
     let mut pcm: Vec<i16> = Vec::with_capacity(CHUNK_SECS * RATE as usize);
-    // Where each listening window sits: (position in pcm, seconds into the file).
-    let mut segs: Vec<(usize, f64)> = Vec::new();
-    let (mut in_win, mut wins, mut clock) = (false, 0usize, 0f64);
+    let mut gaps: Vec<(u32, u32)> = Vec::new();
+    let mut chunk_start = 0.0f64;
     // Mix to mono and step down to 16 kHz by averaging; plenty for speech recognition.
     let (mut acc, mut cnt, mut pos) = (0f32, 0u32, 0u64);
-    let progress = |t: f64| {
-        if total_secs > 0.0 {
-            let _ = app.emit("pk-sync-progress", Progress { stage: "listen", frac: (t / total_secs).min(1.0) });
-        }
-    };
-    loop {
+    let mut ended = false;
+    while !ended {
         if STOP.load(Ordering::SeqCst) {
-            return Err(stopped());
+            return Err(fail(stopped(), &abort));
         }
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(SymErr::IoError(_)) | Err(SymErr::ResetRequired) => break,
-            Err(e) => return Err(e.to_string()),
-        };
-        if packet.track_id() != tid {
-            continue;
+        match format.next_packet() {
+            Ok(packet) if packet.track_id() == tid => match dec.decode(&packet) {
+                Ok(decoded) => {
+                    let spec = *decoded.spec();
+                    let ch = spec.channels.count().max(1);
+                    let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+                    sb.copy_interleaved_ref(decoded);
+                    for frame in sb.samples().chunks(ch) {
+                        acc += frame.iter().sum::<f32>() / ch as f32;
+                        cnt += 1;
+                        pos += RATE as u64;
+                        if pos >= sr {
+                            pos -= sr;
+                            let v = (acc / cnt.max(1) as f32).clamp(-1.0, 1.0);
+                            pcm.push((v * 32767.0) as i16);
+                            acc = 0.0;
+                            cnt = 0;
+                        }
+                    }
+                }
+                Err(SymErr::DecodeError(_)) => {}
+                Err(SymErr::IoError(_)) => ended = true,
+                Err(e) => return Err(fail(e.to_string(), &abort)),
+            },
+            Ok(_) => {}
+            Err(SymErr::IoError(_)) | Err(SymErr::ResetRequired) => ended = true,
+            Err(e) => return Err(fail(e.to_string(), &abort)),
         }
-        // The packet's place in the file, from its timestamp (or by counting, if the file has none).
-        let t = match tb {
-            Some(tb) => {
-                let x = tb.calc_time(packet.ts());
-                x.seconds as f64 + x.frac
+        let full = pcm.len() >= CHUNK_SECS * RATE as usize;
+        if full || (ended && pcm.len() > RATE as usize / 2) {
+            find_pauses(&pcm, chunk_start, &mut gaps);
+            let wav = work.join(format!("chunk{sent}.wav"));
+            write_wav(&wav, &pcm).map_err(|e| fail(e, &abort))?;
+            // Wait for a free worker, collecting finished pieces meanwhile.
+            let mut job = Some((sent, chunk_start, wav));
+            while let Some(j) = job.take() {
+                match job_tx.try_send(j) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(j)) => {
+                        job = Some(j);
+                        match res_rx.recv_timeout(Duration::from_millis(200)) {
+                            Ok(r) => collect(r, &mut done, &mut results).map_err(|e| fail(e, &abort))?,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(_) => return Err(fail("The speech engine stopped unexpectedly.".to_string(), &abort)),
+                        }
+                        if STOP.load(Ordering::SeqCst) {
+                            return Err(fail(stopped(), &abort));
+                        }
+                    }
+                    Err(_) => return Err(fail("The speech engine stopped unexpectedly.".to_string(), &abort)),
+                }
             }
-            None => clock,
-        };
-        let want = t % PERIOD_SECS < WINDOW_SECS;
-        if !want && in_win {
-            in_win = false;
-            wins += 1;
-            if wins >= WINDOWS_PER_RUN {
-                recognize(exe, model, work, &pcm, &segs, &mut words)?;
-                pcm.clear();
-                segs.clear();
-                wins = 0;
-                progress(t);
-            }
-        }
-        if !want && tb.is_some() {
-            continue; // skipped without decoding, which is most of the time saved
-        }
-        if want && !in_win {
-            in_win = true;
-            dec.reset();
-            if !pcm.is_empty() {
-                pcm.extend(std::iter::repeat(0i16).take(GAP));
-            }
-            segs.push((pcm.len(), t));
-            acc = 0.0;
-            cnt = 0;
-            pos = 0;
-        }
-        let decoded = match dec.decode(&packet) {
-            Ok(d) => d,
-            Err(SymErr::DecodeError(_)) => continue,
-            Err(SymErr::IoError(_)) => break,
-            Err(e) => return Err(e.to_string()),
-        };
-        clock += decoded.frames() as f64 / sr as f64;
-        if !want {
-            continue;
-        }
-        let spec = *decoded.spec();
-        let ch = spec.channels.count().max(1);
-        let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
-        sb.copy_interleaved_ref(decoded);
-        for frame in sb.samples().chunks(ch) {
-            acc += frame.iter().sum::<f32>() / ch as f32;
-            cnt += 1;
-            pos += RATE as u64;
-            if pos >= sr {
-                pos -= sr;
-                let v = (acc / cnt.max(1) as f32).clamp(-1.0, 1.0);
-                pcm.push((v * 32767.0) as i16);
-                acc = 0.0;
-                cnt = 0;
-            }
-        }
-        // A file with broken timestamps can look like one endless window; send it in pieces.
-        if pcm.len() >= CHUNK_SECS * RATE as usize {
-            let (o, st) = segs.last().copied().unwrap_or((0, 0.0));
-            let resume = st + (pcm.len() - o) as f64 / RATE as f64;
-            recognize(exe, model, work, &pcm, &segs, &mut words)?;
+            sent += 1;
+            chunk_start += pcm.len() as f64 / RATE as f64;
             pcm.clear();
-            segs.clear();
-            segs.push((0, resume));
-            wins = 0;
-            progress(t);
+        }
+        while let Ok(r) = res_rx.try_recv() {
+            collect(r, &mut done, &mut results).map_err(|e| fail(e, &abort))?;
         }
     }
-    if pcm.len() > RATE as usize / 2 {
-        recognize(exe, model, work, &pcm, &segs, &mut words)?;
+    drop(job_tx);
+    while done < sent {
+        if STOP.load(Ordering::SeqCst) {
+            return Err(fail(stopped(), &abort));
+        }
+        match res_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(r) => collect(r, &mut done, &mut results).map_err(|e| fail(e, &abort))?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => break,
+        }
+    }
+    for h in pool {
+        let _ = h.join();
     }
     let _ = app.emit("pk-sync-progress", Progress { stage: "listen", frac: 1.0 });
-    Ok(words)
+    Ok(Heard { words: results.into_iter().flatten().flatten().collect(), gaps })
+}
+
+/// The pauses in a stretch of audio: quiet for 0.15 s or more, as [start, end] in milliseconds
+/// from the start of the file. Narrators pause between sentences, so a sentence starts where a pause ends.
+fn find_pauses(pcm: &[i16], start: f64, out: &mut Vec<(u32, u32)>) {
+    const FR: usize = 160; // 10 ms
+    let db: Vec<f32> = pcm
+        .chunks(FR)
+        .filter(|c| c.len() == FR)
+        .map(|c| 10.0 * ((c.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / FR as f64) + 1.0).log10() as f32)
+        .collect();
+    if db.len() < 100 {
+        return;
+    }
+    let mut sorted = db.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let (floor, loud) = (sorted[db.len() / 10], sorted[db.len() * 9 / 10]);
+    let th = floor + (loud - floor) * 0.3;
+    let base = start * 1000.0;
+    let mut run: Option<usize> = None;
+    for f in 0..=db.len() {
+        let quiet = f < db.len() && db[f] < th;
+        match (quiet, run) {
+            (true, None) => run = Some(f),
+            (false, Some(r)) => {
+                if f - r >= 15 {
+                    out.push(((base + r as f64 * 10.0) as u32, (base + f as f64 * 10.0) as u32));
+                }
+                run = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 fn write_wav(path: &Path, pcm: &[i16]) -> Result<(), String> {
@@ -357,22 +426,17 @@ fn write_wav(path: &Path, pcm: &[i16]) -> Result<(), String> {
     w.flush().map_err(|e| e.to_string())
 }
 
-fn recognize(exe: &Path, model: &Path, work: &Path, pcm: &[i16], segs: &[(usize, f64)], words: &mut Vec<(u32, String)>) -> Result<(), String> {
-    let wav = work.join("chunk.wav");
-    let json = work.join("chunk.json");
+/// Run the recognizer on one stretch of audio; words come back with their time in the whole file.
+fn recognize(exe: &Path, model: &Path, work: &Path, wav: &Path, i: usize, start: f64, threads: usize, abort: &AtomicBool) -> Result<Vec<(u32, String)>, String> {
+    let base = work.join(format!("chunk{i}"));
+    let json = base.with_extension("json");
     let _ = std::fs::remove_file(&json);
-    write_wav(&wav, pcm)?;
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .saturating_sub(1)
-        .clamp(1, 8);
     let mut cmd = Command::new(exe);
     cmd.arg("-m").arg(model)
-        .arg("-f").arg(&wav)
+        .arg("-f").arg(wav)
         // -bs 1 -bo 1 -nf: take the first good guess for each word instead of comparing several.
         .args(["-l", "en", "-ml", "1", "-sow", "-oj", "-np", "-bs", "1", "-bo", "1", "-nf", "-t", &threads.to_string()])
-        .arg("-of").arg(work.join("chunk"))
+        .arg("-of").arg(&base)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -386,7 +450,7 @@ fn recognize(exe: &Path, model: &Path, work: &Path, pcm: &[i16], segs: &[(usize,
     }
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't start the speech engine: {e}"))?;
     loop {
-        if STOP.load(Ordering::SeqCst) {
+        if STOP.load(Ordering::SeqCst) || abort.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(stopped());
@@ -398,24 +462,23 @@ fn recognize(exe: &Path, model: &Path, work: &Path, pcm: &[i16], segs: &[(usize,
                 }
                 break;
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(e.to_string()),
         }
     }
     let bytes = std::fs::read(&json).map_err(|_| "The speech engine didn't write any words.".to_string())?;
+    let _ = std::fs::remove_file(&json);
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&bytes)).map_err(|e| e.to_string())?;
+    let mut words = Vec::new();
     if let Some(items) = v["transcription"].as_array() {
         for seg in items {
             let text = seg["text"].as_str().unwrap_or("").trim();
             if text.is_empty() {
                 continue;
             }
-            // Map the time inside this batch of windows back to the time in the file.
-            let at = (seg["offsets"]["from"].as_f64().unwrap_or(0.0) / 1000.0 * RATE as f64) as usize;
-            let (o, st) = segs.iter().rev().find(|(o, _)| *o <= at).or(segs.first()).copied().unwrap_or((0, 0.0));
-            let secs = st + at.saturating_sub(o) as f64 / RATE as f64;
-            words.push(((secs * 1000.0) as u32, text.to_string()));
+            let from = seg["offsets"]["from"].as_f64().unwrap_or(0.0);
+            words.push(((start * 1000.0 + from) as u32, text.to_string()));
         }
     }
-    Ok(())
+    Ok(words)
 }
