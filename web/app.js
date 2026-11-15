@@ -1874,22 +1874,38 @@ function setDur(key, d){
   durCache[key] = d; try { localStorage.setItem("pk-durs", JSON.stringify(durCache)); } catch {}
 }
 const durTried = new Set();
+const durOf = t => durCache[t.key] || t.dur || 0;
 async function measureDurs(b){
   for (const t of b.audio.tracks) {
-    if (durCache[t.key] || durTried.has(t.key)) continue;
+    if (durOf(t) || durTried.has(t.key)) continue;
     durTried.add(t.key);
     const blob = await idb.get(t.key); if (!blob) continue;
     const u = URL.createObjectURL(blob); const a = new Audio(); a.preload = "metadata";
     await new Promise(r => { a.onloadedmetadata = r; a.onerror = r; setTimeout(r, 8000); a.src = u; });
     setDur(t.key, a.duration); a.removeAttribute("src"); URL.revokeObjectURL(u);
   }
+  keepDurs(b);
 }
-// Lengths of every part. Parts not measured yet are estimated from their file size.
+// The part that's playing always knows its own length, even where the ones that aren't playing
+// can't be measured (iPhone doesn't load audio in the background).
+function notePlayingDur(b){
+  const t = b.audio.tracks[auBook.track], d = au.duration;
+  if (t && isFinite(d) && d > 0 && Math.abs((durCache[t.key] || 0) - d) > 0.5) { setDur(t.key, d); keepDurs(b); }
+}
+// Save the lengths with the book, so your other devices know them without measuring.
+function keepDurs(b){
+  const id = Object.keys(S.books).find(k => S.books[k] === b); if (!id) return;
+  let changed = false;
+  const tracks = b.audio.tracks.map(t => { const d = durCache[t.key]; if (d && Math.abs((t.dur || 0) - d) > 0.5) { changed = true; return { ...t, dur: Math.round(d * 10) / 10 }; } return t; });
+  if (changed) save(id, { audio: { tracks } });
+}
+// Lengths of every part. Parts not measured yet are estimated from their file size, at the
+// bitrate of the parts that are known.
 function trackDurs(b){
   const tr = b.audio.tracks; let kd = 0, ks = 0;
-  for (const t of tr) if (durCache[t.key] && t.size) { kd += durCache[t.key]; ks += t.size; }
-  const perByte = ks ? kd / ks : 1 / 16000;   // about 128 kbps until we know better
-  return tr.map(t => durCache[t.key] || (t.size ? t.size * perByte : 0) || 1800);
+  for (const t of tr) if (durOf(t) && t.size) { kd += durOf(t); ks += t.size; }
+  const perByte = ks ? kd / ks : 1 / 8000;   // about 64 kbps, typical for audiobooks, until we know better
+  return tr.map(t => durOf(t) || (t.size ? t.size * perByte : 0) || 1800);
 }
 function textIndex(c){
   if (c._fi) return c._fi;
@@ -1918,6 +1934,7 @@ async function followTick(force){
   if (au.paused && !force) return;
   const now = Date.now(); if (!force && now - (followTick.t || 0) < 600) return; followTick.t = now;
   const c = S.content[S.cur]; if (!c) return;
+  notePlayingDur(b);
   measureDurs(b);
   const { off, total: totalA } = audioClock(b);
   const at = off[auBook.track] + (au.currentTime || 0);
