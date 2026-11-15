@@ -1,6 +1,8 @@
 // Automatic follow-along for your own audiobooks, done entirely on this PC.
 // Each audiobook part is decoded to plain 16 kHz speech audio, then whisper.cpp (an open-source
-// speech recognizer bundled with the app) writes down every word with the time it was spoken.
+// speech recognizer bundled with the app) writes down the words with the time they were spoken.
+// To keep long books quick, it only listens to the first 30 seconds of every two minutes; the
+// rest is skipped without even being decoded, and the reader page fills in between.
 // The reader page matches those words to the book's text and saves a small timing map that
 // syncs to your other devices. Nothing is uploaded anywhere for this.
 use futures_util::StreamExt;
@@ -21,11 +23,16 @@ use symphonia::core::probe::Hint;
 use tauri::{AppHandle, Emitter, Manager};
 
 static STOP: AtomicBool = AtomicBool::new(false);
-const MODEL_FILE: &str = "ggml-base.en.bin";
-const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
-const MODEL_MIN: u64 = 100_000_000; // the real file is about 148 MB
+const MODEL_FILE: &str = "ggml-tiny.en.bin";
+const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin";
+const OLD_MODEL: &str = "ggml-base.en.bin"; // the larger model earlier versions used
+const MODEL_MIN: u64 = 60_000_000; // the real file is about 75 MB
 const RATE: u32 = 16_000;
-const CHUNK_SECS: usize = 300; // the recognizer works through five minutes at a time
+const CHUNK_SECS: usize = 300; // never hand the recognizer more than five minutes at once
+const WINDOW_SECS: f64 = 30.0; // listen to this much...
+const PERIOD_SECS: f64 = 120.0; // ...out of every this much
+const WINDOWS_PER_RUN: usize = 6; // listening windows sent to the recognizer together
+const GAP: usize = RATE as usize / 2; // half a second of silence between windows
 
 #[derive(Serialize)]
 pub struct SyncStatus {
@@ -89,7 +96,7 @@ pub fn pk_sync_stop(stop: bool) {
     STOP.store(stop, Ordering::SeqCst);
 }
 
-/// Download the English speech model once (about 148 MB). Progress goes out as "pk-sync-progress".
+/// Download the English speech model once (about 75 MB). Progress goes out as "pk-sync-progress".
 #[tauri::command]
 pub async fn pk_sync_model(app: AppHandle) -> Result<(), String> {
     if model_ready(&app) {
@@ -105,7 +112,7 @@ pub async fn pk_sync_model(app: AppHandle) -> Result<(), String> {
     if !resp.status().is_success() {
         return Err(format!("The model download failed ({}).", resp.status().as_u16()));
     }
-    let total = resp.content_length().unwrap_or(148_000_000);
+    let total = resp.content_length().unwrap_or(77_700_000);
     let mut file = File::create(&part).map_err(|e| e.to_string())?;
     let mut stream = resp.bytes_stream();
     let (mut got, mut last) = (0u64, 0.0f64);
@@ -130,6 +137,9 @@ pub async fn pk_sync_model(app: AppHandle) -> Result<(), String> {
         return Err("The model download was cut short. Try again.".to_string());
     }
     std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_file(dir.join(OLD_MODEL));
+    }
     Ok(())
 }
 
@@ -215,15 +225,23 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
     let tid = track.id;
     let sr = track.codec_params.sample_rate.unwrap_or(44_100).max(1) as u64;
     let total_secs = track.codec_params.n_frames.map(|n| n as f64 / sr as f64).unwrap_or(0.0);
+    let tb = track.codec_params.time_base;
     let mut dec = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|_| "This audio format can't be read for syncing.".to_string())?;
 
     let mut words: Vec<(u32, String)> = Vec::new();
     let mut pcm: Vec<i16> = Vec::with_capacity(CHUNK_SECS * RATE as usize);
-    let mut chunk_start = 0.0f64;
+    // Where each listening window sits: (position in pcm, seconds into the file).
+    let mut segs: Vec<(usize, f64)> = Vec::new();
+    let (mut in_win, mut wins, mut clock) = (false, 0usize, 0f64);
     // Mix to mono and step down to 16 kHz by averaging; plenty for speech recognition.
     let (mut acc, mut cnt, mut pos) = (0f32, 0u32, 0u64);
+    let progress = |t: f64| {
+        if total_secs > 0.0 {
+            let _ = app.emit("pk-sync-progress", Progress { stage: "listen", frac: (t / total_secs).min(1.0) });
+        }
+    };
     loop {
         if STOP.load(Ordering::SeqCst) {
             return Err(stopped());
@@ -236,12 +254,50 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
         if packet.track_id() != tid {
             continue;
         }
+        // The packet's place in the file, from its timestamp (or by counting, if the file has none).
+        let t = match tb {
+            Some(tb) => {
+                let x = tb.calc_time(packet.ts());
+                x.seconds as f64 + x.frac
+            }
+            None => clock,
+        };
+        let want = t % PERIOD_SECS < WINDOW_SECS;
+        if !want && in_win {
+            in_win = false;
+            wins += 1;
+            if wins >= WINDOWS_PER_RUN {
+                recognize(exe, model, work, &pcm, &segs, &mut words)?;
+                pcm.clear();
+                segs.clear();
+                wins = 0;
+                progress(t);
+            }
+        }
+        if !want && tb.is_some() {
+            continue; // skipped without decoding, which is most of the time saved
+        }
+        if want && !in_win {
+            in_win = true;
+            dec.reset();
+            if !pcm.is_empty() {
+                pcm.extend(std::iter::repeat(0i16).take(GAP));
+            }
+            segs.push((pcm.len(), t));
+            acc = 0.0;
+            cnt = 0;
+            pos = 0;
+        }
         let decoded = match dec.decode(&packet) {
             Ok(d) => d,
             Err(SymErr::DecodeError(_)) => continue,
             Err(SymErr::IoError(_)) => break,
             Err(e) => return Err(e.to_string()),
         };
+        clock += decoded.frames() as f64 / sr as f64;
+        if !want {
+            continue;
+        }
         let spec = *decoded.spec();
         let ch = spec.channels.count().max(1);
         let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
@@ -258,17 +314,20 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
                 cnt = 0;
             }
         }
+        // A file with broken timestamps can look like one endless window; send it in pieces.
         if pcm.len() >= CHUNK_SECS * RATE as usize {
-            recognize(exe, model, work, &pcm, chunk_start, &mut words)?;
-            chunk_start += pcm.len() as f64 / RATE as f64;
+            let (o, st) = segs.last().copied().unwrap_or((0, 0.0));
+            let resume = st + (pcm.len() - o) as f64 / RATE as f64;
+            recognize(exe, model, work, &pcm, &segs, &mut words)?;
             pcm.clear();
-            if total_secs > 0.0 {
-                let _ = app.emit("pk-sync-progress", Progress { stage: "listen", frac: (chunk_start / total_secs).min(1.0) });
-            }
+            segs.clear();
+            segs.push((0, resume));
+            wins = 0;
+            progress(t);
         }
     }
     if pcm.len() > RATE as usize / 2 {
-        recognize(exe, model, work, &pcm, chunk_start, &mut words)?;
+        recognize(exe, model, work, &pcm, &segs, &mut words)?;
     }
     let _ = app.emit("pk-sync-progress", Progress { stage: "listen", frac: 1.0 });
     Ok(words)
@@ -298,7 +357,7 @@ fn write_wav(path: &Path, pcm: &[i16]) -> Result<(), String> {
     w.flush().map_err(|e| e.to_string())
 }
 
-fn recognize(exe: &Path, model: &Path, work: &Path, pcm: &[i16], start: f64, words: &mut Vec<(u32, String)>) -> Result<(), String> {
+fn recognize(exe: &Path, model: &Path, work: &Path, pcm: &[i16], segs: &[(usize, f64)], words: &mut Vec<(u32, String)>) -> Result<(), String> {
     let wav = work.join("chunk.wav");
     let json = work.join("chunk.json");
     let _ = std::fs::remove_file(&json);
@@ -311,7 +370,8 @@ fn recognize(exe: &Path, model: &Path, work: &Path, pcm: &[i16], start: f64, wor
     let mut cmd = Command::new(exe);
     cmd.arg("-m").arg(model)
         .arg("-f").arg(&wav)
-        .args(["-l", "en", "-ml", "1", "-sow", "-oj", "-np", "-t", &threads.to_string()])
+        // -bs 1 -bo 1 -nf: take the first good guess for each word instead of comparing several.
+        .args(["-l", "en", "-ml", "1", "-sow", "-oj", "-np", "-bs", "1", "-bo", "1", "-nf", "-t", &threads.to_string()])
         .arg("-of").arg(work.join("chunk"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -350,8 +410,11 @@ fn recognize(exe: &Path, model: &Path, work: &Path, pcm: &[i16], start: f64, wor
             if text.is_empty() {
                 continue;
             }
-            let from = seg["offsets"]["from"].as_f64().unwrap_or(0.0);
-            words.push(((start * 1000.0 + from) as u32, text.to_string()));
+            // Map the time inside this batch of windows back to the time in the file.
+            let at = (seg["offsets"]["from"].as_f64().unwrap_or(0.0) / 1000.0 * RATE as f64) as usize;
+            let (o, st) = segs.iter().rev().find(|(o, _)| *o <= at).or(segs.first()).copied().unwrap_or((0, 0.0));
+            let secs = st + at.saturating_sub(o) as f64 / RATE as f64;
+            words.push(((secs * 1000.0) as u32, text.to_string()));
         }
     }
     Ok(())

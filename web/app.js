@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "autosync-4", items: [
+const WHATS_NEW = { id: "autosync-5", items: [
+  "<b>Automatic sync is much faster:</b> a long audiobook now takes minutes instead of hours, and the player shows about how long is left.",
   "<b>Exact follow-along (Windows app):</b> in the full player, tap <b>Sync automatically</b>. Your PC listens to the audiobook once and matches it to the text, then the iPhone follows along exactly too.",
   "<b>Pop-out text</b> now shows one sentence at a time and moves along with the audiobook.",
   "<b>Dark mode</b> is now on everywhere. Change it in Settings under Look.",
@@ -2068,11 +2069,19 @@ const AS = { run: null };
 const tauriInvoke = (...a) => TAURI.core.invoke(...a);
 function syncText(){
   const r = AS.run; if (!r) return "";
-  if (r.stage === "model") return `Getting the speech model (one time, about 148 MB)… ${Math.round(r.frac * 100)}%`;
+  if (r.stage === "model") return `Getting the speech model (one time, about 75 MB)… ${Math.round(r.frac * 100)}%`;
   if (r.stage === "send") return `Preparing part ${r.part + 1} of ${r.parts}…`;
-  if (r.stage === "listen") return `Listening to part ${r.part + 1} of ${r.parts}… ${Math.round(((r.part + r.frac) / r.parts) * 100)}% overall`;
+  if (r.stage === "listen") return `Listening to part ${r.part + 1} of ${r.parts}… ${Math.round(((r.part + r.frac) / r.parts) * 100)}% overall${syncLeft(r)}`;
   if (r.stage === "match") return "Matching the words to the book…";
   return "Starting…";
+}
+// Time left, from how fast the parts heard so far went (parts heard on an earlier run don't count).
+function syncLeft(r){
+  if (!r.t0) return "";
+  const done = (r.part + r.frac) / r.parts - r.o0, spent = (Date.now() - r.t0) / 1000;
+  if (done < 0.01 || spent < 20) return "";
+  const m = Math.max(1, Math.round(spent / done * (1 - (r.part + r.frac) / r.parts) / 60));
+  return m < 60 ? ` · about ${m} min left` : ` · about ${Math.floor(m / 60)} h ${m % 60} min left`;
 }
 function paintSync(){ const el = $("#syncStatus"); if (el) el.textContent = syncText(); }
 if (TAURI) TAURI.event.listen("pk-sync-progress", e => { if (AS.run && e.payload) { AS.run.stage = e.payload.stage; AS.run.frac = +e.payload.frac || 0; paintSync(); } });
@@ -2099,6 +2108,7 @@ async function autoSync(id){
       const t = tracks[i]; AS.run.part = i; AS.run.frac = 0;
       let words = await idb.get("__tx_" + t.key);   // parts already heard are kept, so a stopped sync picks up where it left off
       if (!words) {
+        if (!AS.run.t0) { AS.run.t0 = Date.now(); AS.run.o0 = i / tracks.length; }
         AS.run.stage = "send"; paintSync();
         let blob = await idb.get(t.key);
         if (!blob && t.asset) blob = await fetchTrack(t);
