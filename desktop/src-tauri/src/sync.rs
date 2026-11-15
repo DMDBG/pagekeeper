@@ -17,10 +17,11 @@ use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymErr;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
 use tauri::{AppHandle, Emitter, Manager};
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -187,18 +188,19 @@ pub fn pk_put_chunk(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<
 
 /// Turn one received audio file into words with their times (milliseconds from the start).
 #[tauri::command]
-pub async fn pk_transcribe(app: AppHandle, file: String) -> Result<Heard, String> {
+pub async fn pk_transcribe(app: AppHandle, file: String, first: Option<f64>) -> Result<Heard, String> {
     safe_file(&file)?;
     let src = work_dir(&app)?.join(&file);
     let app2 = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || transcribe(&app2, &src))
+    let tag = file.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || transcribe(&app2, &src, &tag, first.unwrap_or(0.0)))
         .await
         .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(work_dir(&app)?.join(&file));
     result
 }
 
-fn transcribe(app: &AppHandle, src: &Path) -> Result<Heard, String> {
+fn transcribe(app: &AppHandle, src: &Path, tag: &str, first: f64) -> Result<Heard, String> {
     let exe = whisper_exe(app)?;
     if !model_ready(app) {
         return Err("The speech model isn't downloaded yet.".to_string());
@@ -206,12 +208,21 @@ fn transcribe(app: &AppHandle, src: &Path) -> Result<Heard, String> {
     let model = model_path(app)?;
     let work = work_dir(app)?.join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let out = decode_and_recognize(app, &exe, &model, &work, src);
+    let out = decode_and_recognize(app, &exe, &model, &work, src, tag, first);
     let _ = std::fs::remove_dir_all(&work);
     out
 }
 
-fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, src: &Path) -> Result<Heard, String> {
+/// One finished stretch of audio, sent to the reader page straight away so it can start lining
+/// up the text before the whole book is done.
+#[derive(Serialize, Clone)]
+struct Piece<'a> {
+    tag: &'a str,
+    words: &'a [(u32, String)],
+    gaps: &'a [(u32, u32)],
+}
+
+fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, src: &Path, tag: &str, first: f64) -> Result<Heard, String> {
     let file = File::open(src).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -228,11 +239,19 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or_else(|| "No audio found in this file.".to_string())?;
     let tid = track.id;
+    let tb = track.codec_params.time_base;
     let sr = track.codec_params.sample_rate.unwrap_or(44_100).max(1) as u64;
     let total_secs = track.codec_params.n_frames.map(|n| n as f64 / sr as f64).unwrap_or(0.0);
     let mut dec = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|_| "This audio format can't be read for syncing.".to_string())?;
+
+    // Start where you're listening: jump there first, go to the end, then come back and do the beginning.
+    let mut wrapped = true;
+    if first > 1.0 && tb.is_some() && format.seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(first), track_id: Some(tid) }).is_ok() {
+        dec.reset();
+        wrapped = false;
+    }
 
     // Several copies of the recognizer work at once, each on its own stretch of the audio:
     // on a PC with many cores that's much faster than one copy using them all.
@@ -263,14 +282,18 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
     drop(res_tx);
 
     let mut results: Vec<Option<Vec<(u32, String)>>> = Vec::new();
+    let mut starts: Vec<f64> = Vec::new();
+    let mut piece_gaps: Vec<Vec<(u32, u32)>> = Vec::new();
     let (mut sent, mut done) = (0usize, 0usize);
     let expected = if total_secs > 0.0 { (total_secs / CHUNK_SECS as f64).ceil() as usize } else { 0 };
-    let mut collect = |r: (usize, Result<Vec<(u32, String)>, String>), done: &mut usize, results: &mut Vec<Option<Vec<(u32, String)>>>| -> Result<(), String> {
+    let collect = |r: (usize, Result<Vec<(u32, String)>, String>), done: &mut usize, results: &mut Vec<Option<Vec<(u32, String)>>>, piece_gaps: &Vec<Vec<(u32, u32)>>| -> Result<(), String> {
         let (i, words) = r;
         let words = words?;
         if results.len() <= i {
             results.resize(i + 1, None);
         }
+        let empty: Vec<(u32, u32)> = Vec::new();
+        let _ = app.emit("pk-sync-chunk", Piece { tag, words: &words, gaps: piece_gaps.get(i).unwrap_or(&empty) });
         results[i] = Some(words);
         *done += 1;
         let _ = app.emit("pk-sync-progress", Progress { stage: "listen", frac: (*done as f64 / expected.max(*done + 1) as f64).min(0.99) });
@@ -282,46 +305,70 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
     };
 
     let mut pcm: Vec<i16> = Vec::with_capacity(CHUNK_SECS * RATE as usize);
-    let mut gaps: Vec<(u32, u32)> = Vec::new();
     let mut chunk_start = 0.0f64;
+    let (mut need_start, mut first_at, mut stop_at) = (true, 0.0f64, None::<f64>);
     // Mix to mono and step down to 16 kHz by averaging; plenty for speech recognition.
     let (mut acc, mut cnt, mut pos) = (0f32, 0u32, 0u64);
-    let mut ended = false;
-    while !ended {
+    loop {
         if STOP.load(Ordering::SeqCst) {
             return Err(fail(stopped(), &abort));
         }
+        let mut ended = false;
         match format.next_packet() {
-            Ok(packet) if packet.track_id() == tid => match dec.decode(&packet) {
-                Ok(decoded) => {
-                    let spec = *decoded.spec();
-                    let ch = spec.channels.count().max(1);
-                    let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
-                    sb.copy_interleaved_ref(decoded);
-                    for frame in sb.samples().chunks(ch) {
-                        acc += frame.iter().sum::<f32>() / ch as f32;
-                        cnt += 1;
-                        pos += RATE as u64;
-                        if pos >= sr {
-                            pos -= sr;
-                            let v = (acc / cnt.max(1) as f32).clamp(-1.0, 1.0);
-                            pcm.push((v * 32767.0) as i16);
-                            acc = 0.0;
-                            cnt = 0;
+            Ok(packet) if packet.track_id() == tid => {
+                if need_start {
+                    // where this stretch begins in the file (after a jump, from the packet's own time)
+                    if let Some(tb) = tb {
+                        let t = tb.calc_time(packet.ts());
+                        chunk_start = t.seconds as f64 + t.frac;
+                    }
+                    if !wrapped && stop_at.is_none() {
+                        first_at = chunk_start;
+                    }
+                    need_start = false;
+                }
+                match dec.decode(&packet) {
+                    Ok(decoded) => {
+                        let spec = *decoded.spec();
+                        let ch = spec.channels.count().max(1);
+                        let mut sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+                        sb.copy_interleaved_ref(decoded);
+                        for frame in sb.samples().chunks(ch) {
+                            acc += frame.iter().sum::<f32>() / ch as f32;
+                            cnt += 1;
+                            pos += RATE as u64;
+                            if pos >= sr {
+                                pos -= sr;
+                                let v = (acc / cnt.max(1) as f32).clamp(-1.0, 1.0);
+                                pcm.push((v * 32767.0) as i16);
+                                acc = 0.0;
+                                cnt = 0;
+                            }
                         }
                     }
+                    Err(SymErr::DecodeError(_)) => {}
+                    Err(SymErr::IoError(_)) => ended = true,
+                    Err(e) => return Err(fail(e.to_string(), &abort)),
                 }
-                Err(SymErr::DecodeError(_)) => {}
-                Err(SymErr::IoError(_)) => ended = true,
-                Err(e) => return Err(fail(e.to_string(), &abort)),
-            },
+            }
             Ok(_) => {}
             Err(SymErr::IoError(_)) | Err(SymErr::ResetRequired) => ended = true,
             Err(e) => return Err(fail(e.to_string(), &abort)),
         }
+        // On the second pass, stop where the first one began.
+        let mut finish = ended;
+        if let Some(s) = stop_at {
+            if chunk_start + pcm.len() as f64 / RATE as f64 >= s {
+                pcm.truncate(((s - chunk_start).max(0.0) * RATE as f64) as usize);
+                finish = true;
+            }
+        }
         let full = pcm.len() >= CHUNK_SECS * RATE as usize;
-        if full || (ended && pcm.len() > RATE as usize / 2) {
-            find_pauses(&pcm, chunk_start, &mut gaps);
+        if full || (finish && pcm.len() > RATE as usize / 2) {
+            let mut g = Vec::new();
+            find_pauses(&pcm, chunk_start, &mut g);
+            piece_gaps.push(g);
+            starts.push(chunk_start);
             let wav = work.join(format!("chunk{sent}.wav"));
             write_wav(&wav, &pcm).map_err(|e| fail(e, &abort))?;
             // Wait for a free worker, collecting finished pieces meanwhile.
@@ -332,7 +379,7 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
                     Err(mpsc::TrySendError::Full(j)) => {
                         job = Some(j);
                         match res_rx.recv_timeout(Duration::from_millis(200)) {
-                            Ok(r) => collect(r, &mut done, &mut results).map_err(|e| fail(e, &abort))?,
+                            Ok(r) => collect(r, &mut done, &mut results, &piece_gaps).map_err(|e| fail(e, &abort))?,
                             Err(mpsc::RecvTimeoutError::Timeout) => {}
                             Err(_) => return Err(fail("The speech engine stopped unexpectedly.".to_string(), &abort)),
                         }
@@ -346,9 +393,28 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
             sent += 1;
             chunk_start += pcm.len() as f64 / RATE as f64;
             pcm.clear();
+        } else if finish {
+            pcm.clear();
         }
         while let Ok(r) = res_rx.try_recv() {
-            collect(r, &mut done, &mut results).map_err(|e| fail(e, &abort))?;
+            collect(r, &mut done, &mut results, &piece_gaps).map_err(|e| fail(e, &abort))?;
+        }
+        if finish {
+            if !wrapped {
+                wrapped = true;
+                // Now the beginning of the file, up to where we started.
+                if first_at > 1.0 && format.seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(0.0), track_id: Some(tid) }).is_ok() {
+                    dec.reset();
+                    stop_at = Some(first_at);
+                    need_start = true;
+                    chunk_start = 0.0;
+                    acc = 0.0;
+                    cnt = 0;
+                    pos = 0;
+                    continue;
+                }
+            }
+            break;
         }
     }
     drop(job_tx);
@@ -357,7 +423,7 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
             return Err(fail(stopped(), &abort));
         }
         match res_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(r) => collect(r, &mut done, &mut results).map_err(|e| fail(e, &abort))?,
+            Ok(r) => collect(r, &mut done, &mut results, &piece_gaps).map_err(|e| fail(e, &abort))?,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(_) => break,
         }
@@ -366,7 +432,20 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
         let _ = h.join();
     }
     let _ = app.emit("pk-sync-progress", Progress { stage: "listen", frac: 1.0 });
-    Ok(Heard { words: results.into_iter().flatten().flatten().collect(), gaps })
+    // Put the stretches back in the order they come in the file.
+    let mut order: Vec<usize> = (0..starts.len()).collect();
+    order.sort_by(|a, b| starts[*a].partial_cmp(&starts[*b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut words = Vec::new();
+    let mut gaps = Vec::new();
+    for i in order {
+        if let Some(Some(w)) = results.get_mut(i).map(|x| x.take()) {
+            words.extend(w);
+        }
+        if let Some(g) = piece_gaps.get(i) {
+            gaps.extend_from_slice(g);
+        }
+    }
+    Ok(Heard { words, gaps })
 }
 
 /// The pauses in a stretch of audio: quiet for 0.15 s or more, as [start, end] in milliseconds

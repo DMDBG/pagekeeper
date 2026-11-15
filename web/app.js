@@ -2281,12 +2281,14 @@ async function followTick(force){
   measureDurs(b);
   const { off, total: totalA } = audioClock(b);
   const at = off[auBook.track] + (au.currentTime || 0);
-  const key = S.cur + "|" + ((b.sync && b.sync.d && b.sync.d.length) || 0) + "|" + ((b.sync && b.sync.at) || 0) + "|" + off.join(",") + "|" + JSON.stringify((b.follow && b.follow.pts) || []);
+  // While the full sync runs, use what's been matched so far (it's exact where it has heard).
+  const sb = AS.interim && AS.interim.id === S.cur && !(b.sync && b.sync.v === 2 && !needsSync(b, c)) ? { sync: AS.interim.sync } : b;
+  const key = S.cur + "|" + ((sb.sync && sb.sync.d && sb.sync.d.length) || 0) + "|" + ((sb.sync && sb.sync.at) || 0) + "|" + off.join(",") + "|" + JSON.stringify((b.follow && b.follow.pts) || []);
   if (fPts.key !== key) {
     const g = (ti, t) => (off[ti] ?? off[off.length - 1]) + t;
     const manual = ((b.follow && b.follow.pts) || []).map(([ti, t, f]) => [g(ti, t), f]);
     // Timing from automatic sync, with your own line-ups taking over near where you made them.
-    const auto = syncPoints(b, textIndex(c)).map(([ti, t, f]) => [g(ti, t), f])
+    const auto = syncPoints(sb, textIndex(c)).map(([ti, t, f]) => [g(ti, t), f])
       .filter(([a, f]) => manual.every(([ma, mf]) => Math.abs(a - ma) > 30 && (a < ma ? f <= mf : f >= mf)));
     fPts.key = key; fPts.ext = auto.length > 1; fPts.P = (auto.length ? auto.concat(manual) : manual).sort((x, y) => x[0] - y[0]);
   }
@@ -2512,13 +2514,55 @@ function syncPoints(b, ix){
   return pts;
 }
 
-const AS = { run: null };
+const AS = { run: null, interim: null };
+/* The matching runs in a background worker built from the same functions, so the page never stalls. */
+let alignW = null, alignWBook = null, alignWN = 0; const alignWait = {};
+function alignInWorker(id, c, tx, gp){
+  try {
+    if (!alignW) {
+      const src = [`const SENT_RE = ${SENT_RE};`, `const splitS = ${splitS};`, `const normW = ${normW};`, `const WORD_RE = ${WORD_RE};`, `const SYNC_LEAD = ${SYNC_LEAD};`,
+        textIndex, bookWords, alignBook, encodeSync,
+        "let C = null; onmessage = e => { const m = e.data; if (m.c) C = m.c; let res; try { res = alignBook(C, m.tx, m.gp); } catch (err) { res = { ok: false, msg: String(err && err.message || err) }; } postMessage({ n: m.n, res }); };"].map(String).join("\n");
+      alignW = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+      alignW.onmessage = e => { const f = alignWait[e.data.n]; delete alignWait[e.data.n]; if (f) f(e.data.res); };
+    }
+    const n = ++alignWN, msg = { n, tx, gp };
+    if (alignWBook !== id) { msg.c = { kind: c.kind, pages: c.pages }; alignWBook = id; }
+    return new Promise(r => { alignWait[n] = r; alignW.postMessage(msg); });
+  } catch { return Promise.resolve(alignBook(c, tx, gp)); }   // no workers: do it here
+}
+/* While the whole book is being heard, line up what's been heard so far every little while.
+   The part you're listening to goes first, starting where you are, so it locks on within a minute. */
+function scheduleInterim(){
+  const r = AS.run; if (!r || r.interimTimer) return;
+  r.interimTimer = setTimeout(async () => {
+    r.interimTimer = null;
+    if (AS.run !== r || !r.c || r.busy) return;
+    const live = r.live.slice().sort((a, b) => a[0] - b[0]), lg = r.liveGaps.slice().sort((a, b) => a[0] - b[0]);
+    const tx = r.heard.map((h, k) => h ? h.words : k === r.liveTi ? live : []), gp = r.heard.map((h, k) => h ? h.gaps : k === r.liveTi ? lg : []);
+    r.busy = true;
+    const res = await alignInWorker(r.id, r.c, tx, gp);
+    r.busy = false;
+    if (AS.run !== r || !res || !res.ok) return;
+    AS.interim = { id: r.id, sync: res.sync };
+    fPts.key = "";
+    if (S.cur === r.id) { fLast.el = null; followTick(true); }
+    if (!r.locked) { r.locked = true; if (S.cur === r.id) toast("Found your place. Each sentence lights up as it's read; the rest of the book keeps matching in the background.", null, 6000); }
+  }, AS.interim && AS.interim.id === r.id ? 12000 : 1500);
+}
+if (TAURI) TAURI.event.listen("pk-sync-chunk", e => {
+  const r = AS.run, p = e.payload; if (!r || !p || p.tag !== r.tag) return;
+  for (const w of p.words || []) r.live.push(w);
+  for (const g of p.gaps || []) r.liveGaps.push(g);
+  scheduleInterim();
+});
 const tauriInvoke = (...a) => TAURI.core.invoke(...a);
 function syncText(){
   const r = AS.run; if (!r) return "";
+  const lock = r.locked ? "Following along exactly where it's matched. " : "";
   if (r.stage === "model") return `Getting the speech model (one time, about 75 MB)… ${Math.round(r.frac * 100)}%`;
   if (r.stage === "send") return `Preparing part ${r.part + 1} of ${r.parts}…`;
-  if (r.stage === "listen") return `Listening to part ${r.part + 1} of ${r.parts}… ${Math.round(((r.part + r.frac) / r.parts) * 100)}% overall${syncLeft(r)}`;
+  if (r.stage === "listen") return `${lock}Listening to ${r.parts > 1 ? `part ${r.part + 1} of ${r.parts}` : "the audiobook"}… ${Math.round(((r.part + r.frac) / r.parts) * 100)}% overall${syncLeft(r)}`;
   if (r.stage === "match") return "Matching the words to the book…";
   return "Starting…";
 }
@@ -2560,18 +2604,23 @@ async function autoSync(id, auto){
   AS.run = { id, stage: "start", frac: 0, part: 0, parts: tracks.length };
   if (S.dock) updateDock();
   const mins = Math.max(1, Math.round(trackDurs(b).reduce((a, d) => a + d, 0) / 70 / 60));
-  toast(`${auto ? "Matching this audiobook to the text, so it follows along exactly" : "Syncing"}. It runs in the background on this PC (about ${mins} min); you can keep reading or listening. Progress shows in the player.`, null, 8000);
+  toast(`Finding your place in the audiobook. It locks on in about a minute, then matches the rest of the book in the background (about ${mins} min). You can keep listening.`, null, 8000);
   try {
     await tauriInvoke("pk_sync_stop", { stop: false });
     const st = await tauriInvoke("pk_sync_status");
     if (!st.engine) throw new Error("The speech engine is missing from this install. Reinstall Pagekeeper.");
     if (!st.model) { AS.run.stage = "model"; AS.run.frac = 0; paintSync(); await tauriInvoke("pk_sync_model"); }
-    const tx = [], gp = [];
-    for (let i = 0; i < tracks.length; i++) {
-      const t = tracks[i]; AS.run.part = i; AS.run.frac = 0;
+    const run = AS.run; run.c = c; run.heard = tracks.map(() => null); run.live = []; run.liveGaps = []; run.liveTi = -1;
+    // The part you're on goes first, starting a little before where you are.
+    const curTi = Math.min(tracks.length - 1, (auBook && auBook.id === id ? auBook.track : b.audio.track) || 0);
+    const curT = auBook && auBook.id === id ? (au.currentTime || 0) : (b.audio.time || 0);
+    const order = [curTi, ...tracks.map((_, i) => i).filter(i => i !== curTi)];
+    for (let oi = 0; oi < order.length; oi++) {
+      const i = order[oi], t = tracks[i]; AS.run.part = oi; AS.run.frac = 0;
       let heard = await idb.get("__tx2_" + t.key);   // parts already heard are kept, so a stopped sync picks up where it left off
-      if (!heard || !heard.words) {
-        if (!AS.run.t0) { AS.run.t0 = Date.now(); AS.run.o0 = i / tracks.length; }
+      if (heard && heard.words) { run.heard[i] = heard; if (oi === 0 || run.heard.filter(Boolean).length === 1) scheduleInterim(); continue; }
+      {
+        if (!AS.run.t0) { AS.run.t0 = Date.now(); AS.run.o0 = oi / tracks.length; }
         AS.run.stage = "send"; paintSync();
         let blob = await idb.get(t.key);
         if (!blob && t.asset) blob = await fetchTrack(t);
@@ -2584,18 +2633,21 @@ async function autoSync(id, auto){
           await tauriInvoke("pk_put_chunk", buf, { headers: { "x-file": name } });
         }
         AS.run.stage = "listen"; paintSync();
-        heard = await tauriInvoke("pk_transcribe", { file: name });
+        run.tag = name; run.liveTi = i; run.live = []; run.liveGaps = [];
+        heard = await tauriInvoke("pk_transcribe", { file: name, first: i === curTi ? Math.max(0, curT - 20) : 0 });
+        run.liveTi = -1;
         await idb.put("__tx2_" + t.key, heard);
         idb.del("__tx_" + t.key);   // what the older, quicker sync heard
+        run.heard[i] = heard; scheduleInterim();
       }
-      tx.push(heard.words); gp.push(heard.gaps || []);
     }
+    const tx = run.heard.map(h => h.words), gp = run.heard.map(h => h.gaps || []);
     AS.run.stage = "match"; paintSync();
     await new Promise(r => setTimeout(r, 50));
-    const res = alignBook(c, tx, gp);
+    const res = await alignInWorker(id, c, tx, gp);
     if (!res.ok) throw new Error(res.msg);
     save(id, { sync: res.sync }, { now: true });
-    fPts.key = "";
+    AS.interim = null; fPts.key = "";
     if (S.cur === id) { fLast.el = null; followTick(true); }
     toast(`Synced. Each sentence now lights up as it's read${res.coverage < 0.8 ? ` (the audiobook covers about ${Math.max(1, Math.round(res.coverage * 100))}% of this book's text; the rest isn't read in it)` : ""}. It syncs to your iPhone too.`, null, 9000);
   } catch (e) {
@@ -2604,7 +2656,8 @@ async function autoSync(id, auto){
     if (/stopped/i.test(msg)) toast("Stopped. Parts already done are kept, so it picks up where it left off when you tap Sync again.", null, 6000);
     else toast("Couldn't sync: " + esc(msg), null, 9000);
   } finally {
-    AS.run = null; AS.stop = false;
+    if (AS.run && AS.run.interimTimer) clearTimeout(AS.run.interimTimer);
+    AS.run = null; AS.stop = false;   // any partial timing (AS.interim) stays in use until a full sync finishes
     if (S.dock) updateDock();
   }
 }
