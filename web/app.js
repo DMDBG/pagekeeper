@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "exact-10", items: [
+const WHATS_NEW = { id: "exact-11", items: [
+  "<b>Follow-along locks on within a minute</b> on the PC, starting right where you are, even when the book has an intro the audiobook skips. Then every sentence start is double-checked by listening, so the highlight changes right as each sentence is read.",
   "<b>Exact follow-along on the PC:</b> open a book with its audiobook and Pagekeeper listens to the whole thing once (about 20 minutes for a long book), then lights up each sentence right as it's read. No Line up needed, and it syncs to your iPhone.",
   "<b>M4B audiobooks split too:</b> big M4B and M4A files are now cut into smaller parts without changing the sound, so they can go to your iPhone. Sending over Wi-Fi does this for you.",
   "<b>Send audiobooks to your iPhone over Wi-Fi:</b> in the PC player, tap <b>Send to iPhone over Wi-Fi</b>, then on the iPhone tap <b>Get from PC</b>. No account storage and no size limit.",
@@ -1527,7 +1528,7 @@ async function splitBigParts(id, quiet){
   const [nt, ns] = re(b.audio.track || 0, b.audio.time || 0);
   const patch = { audio: { tracks, track: nt, time: Math.round(ns) } };
   if (b.follow && b.follow.pts) patch.follow = { ...b.follow, pts: b.follow.pts.map(([ti, t, f]) => { const [a, x] = re(ti, t); return [a, Math.round(x * 10) / 10, f]; }) };
-  if (b.sync && b.sync.d) patch.sync = { ...b.sync, parts: tracks.length, d: encodeSync(decodeSync(b.sync).map(([ti, ms, o]) => { const [a, x] = re(ti, ms / 1000); return [a, x * 1000, o]; })) };
+  if (b.sync && b.sync.d) patch.sync = { ...b.sync, parts: tracks.length, d: encodeSync(decodeSync(b.sync).map(([ti, ms, o]) => { const [a, x] = re(ti, ms / 1000); return [a, x * 1000, o]; }), b.sync.u || 100) };
   save(id, patch, { now: true });
   for (const k of drop) { idb.del(k); delete S.haveLocal[k]; }
   if (auBook && auBook.id === id) auBook = null;
@@ -2379,14 +2380,21 @@ function bookWords(c){
   const w = [], o = [], ss = []; let n = 0;
   for (const blocks of c.pages) for (const [t, x] of blocks) for (const q of (t === "h" ? [x] : splitS(x))) {
     ss.push([n, w.length]);   // where each sentence starts, and its first word
-    for (const m of q.matchAll(WORD_RE)) { const k = normW(m[0]); if (k) { w.push(k); o.push(n + m.index); } }
+    const ms = [...q.matchAll(WORD_RE)];
+    for (let i = 0; i < ms.length; i++) {
+      let m = ms[i], word = m[0];
+      // a chapter's decorative first letter set apart from the rest of its word ("T hufir")
+      if (/^[B-HJ-NP-Z]$/.test(word) && ms[i + 1] && ms[i + 1].index === m.index + 2 && /^[a-z]/.test(ms[i + 1][0])) { word += ms[i + 1][0]; i++; }
+      const k = normW(word); if (k) { w.push(k); o.push(n + m.index); }
+    }
     n += q.length;
   }
   return { w, o, ss };
 }
 const SYNC_LEAD = 150;   // the recognizer marks words about a tenth of a second late; switch sentences just before
 // tx: one list per part of [milliseconds, text] from the recognizer; gp: the pauses in each part.
-function alignBook(c, tx, gp){
+// fx: per part, sentence starts already double-checked by listening: [[place in text, ms], ...]
+function alignBook(c, tx, gp, fx){
   const ix = textIndex(c), B = bookWords(c);
   const tw = [], tt = [], tm = [];
   tx.forEach((list, ti) => { for (const [ms, text] of list) for (const piece of String(text).split(/\s+/)) { const k = normW(piece); if (k) { tw.push(k); tt.push(ti); tm.push(ms); } } });
@@ -2466,9 +2474,21 @@ function alignBook(c, tx, gp){
     for (let k = lo; k < g.length && g[k][1] <= ms + 2000; k++) { const s = Math.min(g[k][1] - g[k][0], 800) / 800 - Math.abs(g[k][1] - ms) / 2000; if (s > bs) { bs = s; best = g[k][1]; } }
     return best < 0 ? Math.max(0, ms - SYNC_LEAD) : Math.max(0, best - 30);
   };
-  const pts = [];
+  const pts = [], suspect = [];
+  // Where the recognizer's timing looks wrong around a sentence start (it skipped words, or crammed
+  // or stretched them), note a few seconds to listen to again on their own.
+  const check = fw => {
+    const q = near(fw, 1, 8), p = near(fw - 1, -1, 12); if (q < 0) return;
+    const [tq, mq] = at(q);
+    let bad = mi[fw] < 0 && q - fw > 2;
+    if (p >= 0 && tt[mi[p]] === tq) { const dt = mq - at(p)[1], n = q - p; if (dt < 150 * n || dt > 900 * n + 3000) bad = true; }
+    const q2 = near(q + 1, 1, 6); if (q2 >= 0 && tt[mi[q2]] === tq && at(q2)[1] - mq < 110 * (q2 - q)) bad = true;
+    if (bad) suspect.push([tq, Math.max(0, (p >= 0 && tt[mi[p]] === tq ? at(p)[1] : mq - 3000) - 1500), mq + 5000]);
+  };
+  const R = [];   // each sentence: [part, the recognizer's time for its start, where it starts in the text]
   for (const [off, fw] of B.ss) {
     if (fw < first || fw > last) continue;
+    check(fw);
     let ti, ms;
     if (mi[fw] >= 0) [ti, ms] = at(fw);
     else {
@@ -2479,26 +2499,37 @@ function alignBook(c, tx, gp){
       else if (p >= 0) { [ti, ms] = at(p); ms += (fw - p) * pace(p); }
       else continue;
     }
-    const p = pts[pts.length - 1], after = x => !p || ti > p[0] || (ti === p[0] && x > p[1] + 200);
+    R.push([ti, ms, off]);
+  }
+  const T = R.map(([ti, ms]) => snap(ti, ms));
+  const sure = new Map(); (fx || []).forEach((list, ti) => { for (const [off, ms] of list || []) sure.set(ti + ":" + off, ms); });
+  R.forEach(([ti, , off], k) => { const v = sure.get(ti + ":" + off); if (v !== undefined) T[k] = v; });
+  for (let k = 0; k < R.length; k++) {
+    const [ti, ms, off] = R[k], p = pts[pts.length - 1], after = x => !p || ti > p[0] || (ti === p[0] && x > p[1] + 200);
     // two short sentences can land on the same pause: the second keeps the recognizer's time
-    let t = snap(ti, ms); if (!after(t)) t = Math.max(0, ms - SYNC_LEAD);
+    let t = T[k]; if (!after(t)) t = Math.max(0, ms - SYNC_LEAD);
     if (!after(t)) continue;
     pts.push([ti, t, off]);
   }
   const span = last - first + 1;
-  return { ok: true, coverage: (B.o[last] - B.o[first]) / ix.total, heard: matched / span,
-    sync: { v: 2, total: ix.total, n: pts.length, parts: tx.length, d: encodeSync(pts), at: Date.now() } };
+  // join overlapping stretches to listen again
+  suspect.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const again = [];
+  for (const w of suspect) { const l = again[again.length - 1]; if (l && l[0] === w[0] && w[1] <= l[2] + 1000) l[2] = Math.max(l[2], w[2]); else again.push(w.slice()); }
+  return { ok: true, coverage: (B.o[last] - B.o[first]) / ix.total, heard: matched / span, again,
+    sync: { v: 2, u: 10, total: ix.total, n: pts.length, parts: tx.length, d: encodeSync(pts, 10), at: Date.now() } };
 }
 
 // The timing map as [part, milliseconds, character position], and back.
 function decodeSync(s){
   let ti = 0, d = 0, o = 0; const out = [];
-  for (const part of s.d.split(";")) { const [a, x, y] = part.split(",").map(v => parseInt(v, 36)); if (a) { ti += a; d = x; } else d += x; o += y; out.push([ti, d * 100, o]); }
+  for (const part of s.d.split(";")) { const [a, x, y] = part.split(",").map(v => parseInt(v, 36)); if (a) { ti += a; d = x; } else d += x; o += y; out.push([ti, d * (s.u || 100), o]); }
   return out;
 }
-function encodeSync(pts){
+// u: the time unit in milliseconds (100 in older maps, 10 now)
+function encodeSync(pts, u = 100){
   let pt = 0, pd = 0, po = 0; const enc = [];
-  for (const [ti, ms, o] of pts) { const d = Math.round(ms / 100); enc.push([ti - pt, ti !== pt ? d : d - pd, o - po].map(v => v.toString(36)).join(",")); pt = ti; pd = d; po = o; }
+  for (const [ti, ms, o] of pts) { const d = Math.round(ms / u); enc.push([ti - pt, ti !== pt ? d : d - pd, o - po].map(v => v.toString(36)).join(",")); pt = ti; pd = d; po = o; }
   return enc.join(";");
 }
 function syncPoints(b, ix){
@@ -2508,7 +2539,7 @@ function syncPoints(b, ix){
   for (const part of s.d.split(";")) {
     const [a, x, y] = part.split(",").map(v => parseInt(v, 36));
     if (a) { ti += a; d = x; } else d += x;
-    o += y; pts.push([ti, d / 10, o / ix.total]);
+    o += y; pts.push([ti, d * (s.u || 100) / 1000, o / ix.total]);
   }
   syncPoints.cache = { d: s.d, pts };
   return pts;
@@ -2517,19 +2548,65 @@ function syncPoints(b, ix){
 const AS = { run: null, interim: null };
 /* The matching runs in a background worker built from the same functions, so the page never stalls. */
 let alignW = null, alignWBook = null, alignWN = 0; const alignWait = {};
-function alignInWorker(id, c, tx, gp){
+function alignInWorker(id, c, tx, gp, fx){
   try {
     if (!alignW) {
       const src = [`const SENT_RE = ${SENT_RE};`, `const splitS = ${splitS};`, `const normW = ${normW};`, `const WORD_RE = ${WORD_RE};`, `const SYNC_LEAD = ${SYNC_LEAD};`,
-        textIndex, bookWords, alignBook, encodeSync,
-        "let C = null; onmessage = e => { const m = e.data; if (m.c) C = m.c; let res; try { res = alignBook(C, m.tx, m.gp); } catch (err) { res = { ok: false, msg: String(err && err.message || err) }; } postMessage({ n: m.n, res }); };"].map(String).join("\n");
+        textIndex, bookWords, alignBook, encodeSync, decodeSync,
+        "let C = null; onmessage = e => { const m = e.data; if (m.c) C = m.c; let res; try { res = alignBook(C, m.tx, m.gp, m.fx); } catch (err) { res = { ok: false, msg: String(err && err.message || err) }; } postMessage({ n: m.n, res }); };"].map(String).join("\n");
       alignW = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
       alignW.onmessage = e => { const f = alignWait[e.data.n]; delete alignWait[e.data.n]; if (f) f(e.data.res); };
     }
-    const n = ++alignWN, msg = { n, tx, gp };
+    const n = ++alignWN, msg = { n, tx, gp, fx };
     if (alignWBook !== id) { msg.c = { kind: c.kind, pages: c.pages }; alignWBook = id; }
     return new Promise(r => { alignWait[n] = r; alignW.postMessage(msg); });
-  } catch { return Promise.resolve(alignBook(c, tx, gp)); }   // no workers: do it here
+  } catch { return Promise.resolve(alignBook(c, tx, gp, fx)); }   // no workers: do it here
+}
+/* The double-check. For every sentence start in a part, listen to a couple of seconds starting right
+   there: if the first words heard are the sentence's own first words, it's right. If not, try the
+   nearby pauses and word starts until one passes (or keep the first guess). */
+const ckSame = (a, b) => a === b || (a.length > 3 && b.length > 3 && a.slice(0, 3) === b.slice(0, 3)) || (a.length > 4 && b.length > 4 && a.slice(-3) === b.slice(-3));
+function ckPass(heard, want){
+  const h = heard.map(normW).filter(Boolean);
+  if (!h.length || !want.length || !ckSame(h[0], want[0])) return false;
+  return want[0].length > 3 || want.length < 2 || (h[1] !== undefined && ckSame(h[1], want[1]));   // a short first word needs the next one too
+}
+async function checkPart(r, i){
+  const h = r.heard[i]; if (!h || !h.job) return;
+  try {
+    const tx = r.heard.map((x, k) => x ? x.words : []), gp = r.heard.map(x => x ? x.gaps || [] : []), fx = r.heard.map(x => x ? x.fix || [] : []);
+    const res = await alignInWorker(r.id, r.c, tx, gp, fx); if (!res || !res.ok) return;
+    if (!r.B) r.B = bookWords(r.c);
+    const firstAt = new Map(); for (const [off, fw] of r.B.ss) firstAt.set(off, r.B.w.slice(fw, fw + 3));
+    const items = [];
+    for (const [ti, ms, off] of decodeSync(res.sync)) {
+      if (ti !== i) continue;
+      const want = firstAt.get(off); if (!want || !want.length) continue;
+      const near = (h.gaps || []).filter(g => g[1] > ms - 3000 && g[1] < ms + 6000).map(g => g[1] - 30)
+        .concat(h.words.filter(w => w[0] > ms - 3000 && w[0] < ms + 6000).map(w => w[0]));
+      near.sort((a, b) => Math.abs(a - ms) - Math.abs(b - ms));
+      const cands = [Math.round(ms)]; for (const c of near) if (cands.length < 13 && cands.every(x => Math.abs(x - c) > 200)) cands.push(Math.max(0, Math.round(c)));
+      items.push({ off, want, cands, k: 0, done: null });
+    }
+    r.stage = "check"; r.frac = 0; paintSync();
+    const total = items.length;
+    for (let round = 0, per = 1; round < 6; round++, per = 3) {
+      const open = items.filter(x => x.done === null && x.k < x.cands.length); if (!open.length) break;
+      const asks = []; for (const x of open) for (let j = 0; j < per && x.k + j < x.cands.length; j++) asks.push([x, x.cands[x.k + j]]);
+      const heard = await tauriInvoke("pk_check", { job: h.job, starts: asks.map(a => a[1]) });
+      if (AS.stop) throw new Error("Stopped.");
+      asks.forEach(([x, c], n) => { if (x.done === null && ckPass(heard[n] || [], x.want)) x.done = c; });
+      for (const x of open) x.k += per;
+      r.frac = Math.min(0.99, items.filter(x => x.done !== null || x.k >= x.cands.length).length / Math.max(1, total)); paintSync();
+    }
+    // A passing clip can start in the quiet just before the sentence: the voice begins where that pause ends.
+    const g = h.gaps || [];
+    const settle = c => { const p = g.find(x => x[0] <= c + 250 && x[1] >= c - 100 && x[1] <= c + 900); return p ? Math.max(c, p[1] - 30) : c; };
+    h.fix = items.filter(x => x.done !== null).map(x => [x.off, settle(x.done)]);
+  } finally {
+    tauriInvoke("pk_sync_release", { job: h.job }).catch(() => {});
+    delete h.job;
+  }
 }
 /* While the whole book is being heard, line up what's been heard so far every little while.
    The part you're listening to goes first, starting where you are, so it locks on within a minute. */
@@ -2540,8 +2617,9 @@ function scheduleInterim(){
     if (AS.run !== r || !r.c || r.busy) return;
     const live = r.live.slice().sort((a, b) => a[0] - b[0]), lg = r.liveGaps.slice().sort((a, b) => a[0] - b[0]);
     const tx = r.heard.map((h, k) => h ? h.words : k === r.liveTi ? live : []), gp = r.heard.map((h, k) => h ? h.gaps : k === r.liveTi ? lg : []);
+    const fx = r.heard.map(h => h ? h.fix || [] : []);
     r.busy = true;
-    const res = await alignInWorker(r.id, r.c, tx, gp);
+    const res = await alignInWorker(r.id, r.c, tx, gp, fx);
     r.busy = false;
     if (AS.run !== r || !res || !res.ok) return;
     AS.interim = { id: r.id, sync: res.sync };
@@ -2563,6 +2641,7 @@ function syncText(){
   if (r.stage === "model") return `Getting the speech model (one time, about 75 MB)… ${Math.round(r.frac * 100)}%`;
   if (r.stage === "send") return `Preparing part ${r.part + 1} of ${r.parts}…`;
   if (r.stage === "listen") return `${lock}Listening to ${r.parts > 1 ? `part ${r.part + 1} of ${r.parts}` : "the audiobook"}… ${Math.round(((r.part + r.frac) / r.parts) * 100)}% overall${syncLeft(r)}`;
+  if (r.stage === "check") return `${lock}Double-checking each sentence in ${r.parts > 1 ? `part ${r.part + 1} of ${r.parts}` : "the audiobook"}… ${Math.round(r.frac * 100)}%`;
   if (r.stage === "match") return "Matching the words to the book…";
   return "Starting…";
 }
@@ -2603,8 +2682,8 @@ async function autoSync(id, auto){
   if (away.length) { toast(`${away.length} part${away.length > 1 ? "s aren't" : " isn't"} on this PC yet. Add the matching files first.`, null, 7000); return; }
   AS.run = { id, stage: "start", frac: 0, part: 0, parts: tracks.length };
   if (S.dock) updateDock();
-  const mins = Math.max(1, Math.round(trackDurs(b).reduce((a, d) => a + d, 0) / 70 / 60));
-  toast(`Finding your place in the audiobook. It locks on in about a minute, then matches the rest of the book in the background (about ${mins} min). You can keep listening.`, null, 8000);
+  const mins = Math.max(1, Math.round(trackDurs(b).reduce((a, d) => a + d, 0) / 45 / 60));   // listening (~70x) plus double-checking each sentence
+  toast(`Finding your place in the audiobook. It locks on in about a minute, then matches and double-checks every sentence of the book in the background (about ${mins} min). You can keep listening.`, null, 8000);
   try {
     await tauriInvoke("pk_sync_stop", { stop: false });
     const st = await tauriInvoke("pk_sync_status");
@@ -2636,15 +2715,18 @@ async function autoSync(id, auto){
         run.tag = name; run.liveTi = i; run.live = []; run.liveGaps = [];
         heard = await tauriInvoke("pk_transcribe", { file: name, first: i === curTi ? Math.max(0, curT - 20) : 0 });
         run.liveTi = -1;
-        await idb.put("__tx2_" + t.key, heard);
-        idb.del("__tx_" + t.key);   // what the older, quicker sync heard
         run.heard[i] = heard; scheduleInterim();
+        await checkPart(run, i);   // double-check every sentence start in this part
+        AS.run.stage = "listen";
+        await idb.put("__tx2_" + t.key, { words: heard.words, gaps: heard.gaps, fix: heard.fix || [] });
+        idb.del("__tx_" + t.key);   // what the older, quicker sync heard
+        scheduleInterim();
       }
     }
-    const tx = run.heard.map(h => h.words), gp = run.heard.map(h => h.gaps || []);
+    const tx = run.heard.map(h => h.words), gp = run.heard.map(h => h.gaps || []), fx = run.heard.map(h => h.fix || []);
     AS.run.stage = "match"; paintSync();
     await new Promise(r => setTimeout(r, 50));
-    const res = await alignInWorker(id, c, tx, gp);
+    const res = await alignInWorker(id, c, tx, gp, fx);
     if (!res.ok) throw new Error(res.msg);
     save(id, { sync: res.sync }, { now: true });
     AS.interim = null; fPts.key = "";

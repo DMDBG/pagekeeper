@@ -300,7 +300,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption, pk_hotkey,
-            sync::pk_sync_status, sync::pk_sync_stop, sync::pk_sync_model, sync::pk_put_begin, sync::pk_put_chunk, sync::pk_transcribe,
+            sync::pk_sync_status, sync::pk_sync_stop, sync::pk_sync_model, sync::pk_put_begin, sync::pk_put_chunk, sync::pk_transcribe, sync::pk_check, sync::pk_sync_release,
             share::pk_share_start, share::pk_share_stop, share::pk_share_has, share::pk_share_begin, share::pk_share_chunk, share::pk_share_list])
         .run(tauri::generate_context!())
         .expect("error while running Pagekeeper");

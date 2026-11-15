@@ -8,10 +8,11 @@
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::collections::HashMap;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
@@ -25,6 +26,15 @@ use symphonia::core::units::Time;
 use tauri::{AppHandle, Emitter, Manager};
 
 static STOP: AtomicBool = AtomicBool::new(false);
+
+/// An audio file that has been heard, kept as plain 16 kHz speech audio (the three-minute pieces)
+/// until the page has double-checked every sentence start in it.
+struct Job {
+    dir: PathBuf,
+    chunks: Vec<(f64, PathBuf, usize)>, // start in seconds, file, number of samples
+}
+static JOBS: Mutex<Option<HashMap<String, Job>>> = Mutex::new(None);
+const CLIP_MS: u32 = 2600; // how much is listened to for each check
 const MODEL_FILE: &str = "ggml-tiny.en.bin";
 const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin";
 const OLD_MODEL: &str = "ggml-base.en.bin"; // the larger model earlier versions used
@@ -38,6 +48,7 @@ const CHUNK_SECS: usize = 180; // each copy of the recognizer takes three minute
 pub struct Heard {
     words: Vec<(u32, String)>,
     gaps: Vec<(u32, u32)>,
+    job: String,
 }
 
 #[derive(Serialize)]
@@ -98,8 +109,110 @@ pub fn pk_sync_status(app: AppHandle) -> SyncStatus {
 
 /// Stop (true) or clear the stop before a new job (false).
 #[tauri::command]
-pub fn pk_sync_stop(stop: bool) {
+pub fn pk_sync_stop(app: AppHandle, stop: bool) {
     STOP.store(stop, Ordering::SeqCst);
+    if stop {
+        return;
+    }
+    // Starting fresh: clear out anything an earlier run left behind.
+    let live: Vec<PathBuf> = JOBS
+        .lock()
+        .ok()
+        .and_then(|j| j.as_ref().map(|m| m.values().map(|x| x.dir.clone()).collect()))
+        .unwrap_or_default();
+    if let Ok(dir) = work_dir(&app) {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() && !live.contains(&p) {
+                    let _ = std::fs::remove_dir_all(&p);
+                }
+            }
+        }
+    }
+}
+
+/// Done with a heard file: delete its speech audio.
+#[tauri::command]
+pub fn pk_sync_release(job: String) {
+    if let Ok(mut j) = JOBS.lock() {
+        if let Some(done) = j.as_mut().and_then(|m| m.remove(&job)) {
+            let _ = std::fs::remove_dir_all(&done.dir);
+        }
+    }
+}
+
+/// The double-check: for each moment, listen to a couple of seconds starting right there and say
+/// which words come first. If they're the sentence's own first words, the sentence starts there.
+#[tauri::command]
+pub async fn pk_check(app: AppHandle, job: String, starts: Vec<u32>) -> Result<Vec<Vec<String>>, String> {
+    let exe = whisper_exe(&app)?;
+    let model = model_path(&app)?;
+    let (dir, chunks) = {
+        let j = JOBS.lock().map_err(|e| e.to_string())?;
+        let found = j.as_ref().and_then(|m| m.get(&job)).ok_or_else(|| "That audio isn't loaded any more.".to_string())?;
+        (found.dir.clone(), found.chunks.clone())
+    };
+    tauri::async_runtime::spawn_blocking(move || check_clips(&exe, &model, &dir, &chunks, &starts))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn read_pcm(chunks: &[(f64, PathBuf, usize)], start_ms: u32, len_ms: u32) -> Vec<i16> {
+    let s0 = (start_ms as f64 / 1000.0 * RATE as f64) as i64;
+    let n = (len_ms as f64 / 1000.0 * RATE as f64) as usize;
+    let mut out = vec![0i16; n];
+    for (cs, path, len) in chunks {
+        let c0 = (cs * RATE as f64).round() as i64;
+        let c1 = c0 + *len as i64;
+        let (a, b) = (s0.max(c0), (s0 + n as i64).min(c1));
+        if a >= b {
+            continue;
+        }
+        if let Ok(mut f) = File::open(path) {
+            if f.seek(SeekFrom::Start(44 + (a - c0) as u64 * 2)).is_ok() {
+                let mut buf = vec![0u8; ((b - a) * 2) as usize];
+                if f.read_exact(&mut buf).is_ok() {
+                    for (k, ch) in buf.chunks_exact(2).enumerate() {
+                        out[(a - s0) as usize + k] = i16::from_le_bytes([ch[0], ch[1]]);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn check_clips(exe: &Path, model: &Path, dir: &Path, chunks: &[(f64, PathBuf, usize)], starts: &[u32]) -> Vec<Vec<String>> {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let workers = (cores / 2).clamp(1, 10);
+    let next = AtomicUsize::new(0);
+    let results: Vec<Mutex<Vec<String>>> = starts.iter().map(|_| Mutex::new(Vec::new())).collect();
+    let never = AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        for w in 0..workers {
+            let (next, results, never) = (&next, &results, &never);
+            sc.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                if i >= starts.len() || STOP.load(Ordering::SeqCst) {
+                    break;
+                }
+                let pcm = read_pcm(chunks, starts[i], CLIP_MS);
+                let wav = dir.join(format!("clip{w}.wav"));
+                if write_wav(&wav, &pcm).is_err() {
+                    continue;
+                }
+                // A short window (-ac 300, about six seconds) makes each check about ten times quicker.
+                if let Ok(words) = run_whisper(exe, model, &wav, &dir.join(format!("clip{w}")), &["-ac", "300"], 2, never) {
+                    if let Ok(mut r) = results[i].lock() {
+                        *r = words.into_iter().take(6).map(|(_, t)| t).collect();
+                    }
+                }
+                let _ = std::fs::remove_file(&wav);
+            });
+        }
+    });
+    results.into_iter().map(|m| m.into_inner().unwrap_or_default()).collect()
 }
 
 /// Download the English speech model once (about 75 MB). Progress goes out as "pk-sync-progress".
@@ -206,11 +319,22 @@ fn transcribe(app: &AppHandle, src: &Path, tag: &str, first: f64) -> Result<Hear
         return Err("The speech model isn't downloaded yet.".to_string());
     }
     let model = model_path(app)?;
-    let work = work_dir(app)?.join(uuid::Uuid::new_v4().to_string());
+    let id = uuid::Uuid::new_v4().to_string();
+    let work = work_dir(app)?.join(&id);
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let out = decode_and_recognize(app, &exe, &model, &work, src, tag, first);
-    let _ = std::fs::remove_dir_all(&work);
-    out
+    match decode_and_recognize(app, &exe, &model, &work, src, tag, first) {
+        Ok((mut heard, chunks)) => {
+            heard.job = id.clone();
+            if let Ok(mut j) = JOBS.lock() {
+                j.get_or_insert_with(HashMap::new).insert(id, Job { dir: work, chunks });
+            }
+            Ok(heard)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&work);
+            Err(e)
+        }
+    }
 }
 
 /// One finished stretch of audio, sent to the reader page straight away so it can start lining
@@ -222,7 +346,7 @@ struct Piece<'a> {
     gaps: &'a [(u32, u32)],
 }
 
-fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, src: &Path, tag: &str, first: f64) -> Result<Heard, String> {
+fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, src: &Path, tag: &str, first: f64) -> Result<(Heard, Vec<(f64, PathBuf, usize)>), String> {
     let file = File::open(src).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -273,7 +397,6 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
             };
             let Ok((i, start, wav)) = job else { break };
             let out = recognize(&exe, &model, &work, &wav, i, start, threads, &abort);
-            let _ = std::fs::remove_file(&wav);
             if tx.send((i, out)).is_err() {
                 break;
             }
@@ -284,6 +407,7 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
     let mut results: Vec<Option<Vec<(u32, String)>>> = Vec::new();
     let mut starts: Vec<f64> = Vec::new();
     let mut piece_gaps: Vec<Vec<(u32, u32)>> = Vec::new();
+    let mut kept: Vec<(f64, PathBuf, usize)> = Vec::new();
     let (mut sent, mut done) = (0usize, 0usize);
     let expected = if total_secs > 0.0 { (total_secs / CHUNK_SECS as f64).ceil() as usize } else { 0 };
     let collect = |r: (usize, Result<Vec<(u32, String)>, String>), done: &mut usize, results: &mut Vec<Option<Vec<(u32, String)>>>, piece_gaps: &Vec<Vec<(u32, u32)>>| -> Result<(), String> {
@@ -371,6 +495,7 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
             starts.push(chunk_start);
             let wav = work.join(format!("chunk{sent}.wav"));
             write_wav(&wav, &pcm).map_err(|e| fail(e, &abort))?;
+            kept.push((chunk_start, wav.clone(), pcm.len()));
             // Wait for a free worker, collecting finished pieces meanwhile.
             let mut job = Some((sent, chunk_start, wav));
             while let Some(j) = job.take() {
@@ -445,7 +570,7 @@ fn decode_and_recognize(app: &AppHandle, exe: &Path, model: &Path, work: &Path, 
             gaps.extend_from_slice(g);
         }
     }
-    Ok(Heard { words, gaps })
+    Ok((Heard { words, gaps, job: String::new() }, kept))
 }
 
 /// The pauses in a stretch of audio: quiet for 0.15 s or more, as [start, end] in milliseconds
@@ -507,7 +632,12 @@ fn write_wav(path: &Path, pcm: &[i16]) -> Result<(), String> {
 
 /// Run the recognizer on one stretch of audio; words come back with their time in the whole file.
 fn recognize(exe: &Path, model: &Path, work: &Path, wav: &Path, i: usize, start: f64, threads: usize, abort: &AtomicBool) -> Result<Vec<(u32, String)>, String> {
-    let base = work.join(format!("chunk{i}"));
+    let words = run_whisper(exe, model, wav, &work.join(format!("chunk{i}")), &[], threads, abort)?;
+    Ok(words.into_iter().map(|(from, t)| ((start * 1000.0 + from) as u32, t)).collect())
+}
+
+/// Run the recognizer on a wav file: each word with when it starts (milliseconds into the file).
+fn run_whisper(exe: &Path, model: &Path, wav: &Path, base: &Path, extra: &[&str], threads: usize, abort: &AtomicBool) -> Result<Vec<(f64, String)>, String> {
     let json = base.with_extension("json");
     let _ = std::fs::remove_file(&json);
     let mut cmd = Command::new(exe);
@@ -515,7 +645,8 @@ fn recognize(exe: &Path, model: &Path, work: &Path, wav: &Path, i: usize, start:
         .arg("-f").arg(wav)
         // -bs 1 -bo 1 -nf: take the first good guess for each word instead of comparing several.
         .args(["-l", "en", "-ml", "1", "-sow", "-oj", "-np", "-bs", "1", "-bo", "1", "-nf", "-t", &threads.to_string()])
-        .arg("-of").arg(&base)
+        .args(extra)
+        .arg("-of").arg(base)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -556,7 +687,7 @@ fn recognize(exe: &Path, model: &Path, work: &Path, wav: &Path, i: usize, start:
                 continue;
             }
             let from = seg["offsets"]["from"].as_f64().unwrap_or(0.0);
-            words.push(((start * 1000.0 + from) as u32, text.to_string()));
+            words.push((from, text.to_string()));
         }
     }
     Ok(words)
