@@ -9,7 +9,9 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "capmenu-6", items: [
+const WHATS_NEW = { id: "capextras-7", items: [
+  "<b>Split big audiobook files:</b> MP3s over 50 MB are cut into smaller parts (same sound, nothing re-encoded), so they copy to your account and your phone. For parts you already added, tap <b>Split big parts</b> in the player.",
+  "<b>Pop-out extras:</b> lock it in place so clicks go through, hide it while paused, and show the chapter and time left. Right-click the pop-out, or find them under Aa.",
   "<b>Pop-out text menu:</b> right-click the pop-out (press and hold on iPhone) to close it, change the text size, switch the background, or play and pause.",
   "<b>Automatic sync is much faster:</b> a long audiobook now takes minutes instead of hours, and the player shows about how long is left.",
   "<b>Exact follow-along (Windows app):</b> in the full player, tap <b>Sync automatically</b>. Your PC listens to the audiobook once and matches it to the text, then the iPhone follows along exactly too.",
@@ -1280,7 +1282,15 @@ function renderSheet(){
           <button id="capInvert">Invert colors</button>
           <button data-capsz="-1" aria-label="Smaller pop-out text">A−</button><button data-capsz="1" aria-label="Larger pop-out text">A+</button>
           <button id="capReset">Reset</button>
-        </div></div>`);
+        </div></div>
+      <div class="field"><label>Pop-out extras</label>
+        <div class="seg">
+          <button data-capx="lock" aria-pressed="${!!prefs.get("capLock")}">${prefs.get("capLock") ? "Unlock pop-out" : "Lock in place"}</button>
+          <button data-capx="autohide" aria-pressed="${!!prefs.get("capHide")}">Hide when paused</button>
+          <button data-capx="info" aria-pressed="${prefs.get("capInfo") !== false}">Chapter and time left</button>
+        </div>
+        <span class="note">Locked, ${TAURI ? "clicks" : "taps"} go straight through the pop-out to whatever is under it. Hide when paused shows it only while the audiobook or read-aloud is playing. You can also ${TAURI ? "right-click" : "press and hold"} the pop-out for these.</span></div>`);
+    el.querySelectorAll("[data-capx]").forEach(b => b.onclick = () => { capCmd(b.dataset.capx); renderSheet(); });
     $("#capToggle").onclick = () => { setCaption(!prefs.get("capOn")); const rp = $("#rPop"); if (rp) rp.setAttribute("aria-pressed", !!prefs.get("capOn")); renderSheet(); };
     el.querySelectorAll("[data-capstyle]").forEach(b => b.onclick = () => { prefs.set("capStyle", b.dataset.capstyle); capSend(); renderSheet(); });
     const ca = $("#capAuto"); if (ca) ca.onclick = () => { prefs.set("capAuto", !capCfg().auto); capSend(); renderSheet(); };
@@ -1322,22 +1332,120 @@ async function addAudio(files, id = S.cur, quiet = false){
   const list = await expandZips(files);
   if (!list.length) { toast("No audio files found. Use MP3, M4A, M4B or a zip of them."); return; }
   const tracks = [...(b.audio?.tracks || [])];
-  let big = 0;
+  let big = 0, split = 0;
   for (const f of list) {
-    const key = `${id}:a:${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
-    await idb.put(key, f); S.haveLocal[key] = true;
-    const fits = f.size <= MAX_FILE;
-    if (!fits) big++;
-    tracks.push({ name: f.name.replace(/\.[^.]+$/, ""), file: f.name, key, asset: null, size: f.size, fp: await fingerprint(f) });
-    if (fits && Cloud.signedIn()) S.uploads.push({ id, kind: "track", key, name: "audio-" + key.split(":").pop() + "." + extOf(f.name), type: f.type || mimeFor(f.name) });
+    // MP3s over the upload limit are cut into smaller parts, so they can copy to your account and your phone.
+    let pieces = null;
+    if (f.size > MAX_FILE && isMp3(f)) { if (!quiet) toast(`Splitting “${esc(f.name)}” into smaller parts…`, null, 120000); pieces = await splitMp3(f).catch(() => null); }
+    if (pieces && pieces.length > 1) {
+      split++;
+      const base = f.name.replace(/\.[^.]+$/, "");
+      for (let k = 0; k < pieces.length; k++) {
+        const pf = new File([pieces[k].blob], `${base} (${k + 1} of ${pieces.length}).mp3`, { type: "audio/mpeg" });
+        tracks.push(await storeTrack(id, pf, `${base} (${k + 1} of ${pieces.length})`, pieces[k].secs));
+      }
+      continue;
+    }
+    if (f.size > MAX_FILE) big++;
+    tracks.push(await storeTrack(id, f, f.name.replace(/\.[^.]+$/, "")));
   }
   const fresh = !(b.audio?.tracks || []).length;
   save(id, { audio: fresh ? { tracks, track: 0, time: 0 } : { tracks } }, { now: true });
   if (quiet) { if (S.cur === id) updateDock(); return; }
   clearToasts();
-  toast(big && Cloud.signedIn() ? `Added. ${big} file${big > 1 ? "s are" : " is"} over 50 MB and stay${big > 1 ? "" : "s"} on this device; your listening spot still syncs.` : Cloud.signedIn() ? "Audio added. It's copying to your account." : "Audio added.");
+  if (split) toast(`Big MP3 files were split into parts under 50 MB, so they can copy to your account and your phone.`, null, 7000);
+  else toast(big && Cloud.signedIn() ? `Added. ${big} file${big > 1 ? "s are" : " is"} over 50 MB and stay${big > 1 ? "" : "s"} on this device; your listening spot still syncs.` : Cloud.signedIn() ? "Audio added. It's copying to your account." : "Audio added.");
   auBook = null; updateDock();
   if (big && Cloud.signedIn() && !b.audio?.url) askAudioLink(id);
+}
+// Store one audio file for a book (and queue it for your account if it fits).
+async function storeTrack(id, f, name, secs){
+  const key = `${id}:a:${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
+  await idb.put(key, f); S.haveLocal[key] = true;
+  const t = { name, file: f.name, key, asset: null, size: f.size, fp: await fingerprint(f) };
+  if (secs) { t.dur = Math.round(secs * 10) / 10; t.durExact = true; setDur(key, secs); }
+  if (f.size <= MAX_FILE && Cloud.signedIn()) S.uploads.push({ id, kind: "track", key, name: "audio-" + key.split(":").pop() + "." + extOf(f.name), type: f.type || mimeFor(f.name) });
+  return t;
+}
+const isMp3 = f => /\.mp3$/i.test(f.file || f.name || "") || f.type === "audio/mpeg";
+/* Cut an MP3 into pieces under the upload limit. MP3 is a chain of small independent frames, so the
+   cuts fall between frames: nothing is re-encoded, nothing is lost, and it's quick. Each piece's exact
+   length comes from counting its frames. */
+async function splitMp3(file, target = 45 * 1024 * 1024){
+  const BR1 = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320], BR2 = [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160];
+  const SRS = { 3: [44100,48000,32000], 2: [22050,24000,16000], 0: [11025,12000,8000] };
+  const WIN = 4 << 20; let buf = new Uint8Array(0), at0 = 0;
+  const need = async (p, n) => { if (p < at0 || p + n > at0 + buf.length) { buf = new Uint8Array(await file.slice(p, p + WIN).arrayBuffer()); at0 = p; } return p + n <= at0 + buf.length; };
+  const head = p => {
+    const i = p - at0, b1 = buf[i + 1], b2 = buf[i + 2];
+    if (buf[i] !== 0xFF || (b1 & 0xE0) !== 0xE0) return null;
+    const ver = (b1 >> 3) & 3, layer = (b1 >> 1) & 3; if (ver === 1 || layer !== 1) return null;
+    const bri = b2 >> 4, sri = (b2 >> 2) & 3; if (!bri || bri === 15 || sri === 3) return null;
+    const sr = SRS[ver][sri], spf = ver === 3 ? 1152 : 576, br = (ver === 3 ? BR1 : BR2)[bri] * 1000;
+    return { len: Math.floor(spf / 8 * br / sr) + ((b2 >> 1) & 1), secs: spf / sr };
+  };
+  let pos = 0;
+  await need(0, 10);
+  if (buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) pos = 10 + (((buf[6] & 127) << 21) | ((buf[7] & 127) << 14) | ((buf[8] & 127) << 7) | (buf[9] & 127)) + (buf[5] & 0x10 ? 10 : 0);
+  const out = []; let start = -1, secs = 0, frames = 0, first = true;
+  while (await need(pos, 4)) {
+    const h = head(pos);
+    // Not a frame here (a tag or damage): step forward until frames start again, checking the next one lines up.
+    let ok = !!h;
+    if (ok && pos + h.len + 4 <= file.size) { const save = pos; if (await need(pos, h.len + 4)) ok = !!head(pos + h.len); await need(save, 4); }
+    if (!ok) { pos++; continue; }
+    if (pos + h.len > file.size) break;
+    if (first) {
+      first = false;
+      // A "Xing"/"Info" header frame states the whole file's length; leave it out of the pieces.
+      await need(pos, Math.min(h.len, 64));
+      const txt = String.fromCharCode(...buf.subarray(pos - at0, pos - at0 + Math.min(h.len, 64)));
+      if (/Xing|Info|VBRI/.test(txt)) { pos += h.len; continue; }
+    }
+    if (start < 0) start = pos;
+    if (pos + h.len - start > target && pos > start) { out.push({ a: start, b: pos, secs }); start = pos; secs = 0; }
+    secs += h.secs; frames++; pos += h.len;
+  }
+  if (start >= 0 && pos > start) out.push({ a: start, b: pos, secs });
+  if (frames < 100) return null;
+  return out.map(x => ({ blob: file.slice(x.a, x.b, "audio/mpeg"), secs: x.secs }));
+}
+// Parts already added that are too big to copy: split them, keeping your place, line-ups and sync timing.
+async function splitBigParts(id){
+  const b = S.books[id]; const old = b?.audio?.tracks || []; if (!old.length) return;
+  await checkLocal(id);
+  const todo = old.map((t, i) => t.size > MAX_FILE && isMp3(t) && S.haveLocal[t.key] ? i : -1).filter(i => i >= 0);
+  if (!todo.length) { toast("No big MP3 parts on this device to split."); return; }
+  if (auBook && auBook.id === id) { au.pause(); saveAudioPos(true); }
+  const tracks = [], map = [], drop = [];
+  for (let i = 0; i < old.length; i++) {
+    const t = old[i];
+    if (!todo.includes(i)) { map.push([[tracks.length, 0, Infinity]]); tracks.push(t); continue; }
+    toast(`Splitting part ${i + 1} of ${old.length}…`, null, 120000);
+    const blob = await idb.get(t.key);
+    const pieces = blob ? await splitMp3(blob).catch(() => null) : null;
+    if (!pieces || pieces.length < 2) { map.push([[tracks.length, 0, Infinity]]); tracks.push(t); continue; }
+    const m = []; let at = 0;
+    for (let k = 0; k < pieces.length; k++) {
+      const pf = new File([pieces[k].blob], `${t.name} (${k + 1} of ${pieces.length}).mp3`, { type: "audio/mpeg" });
+      m.push([tracks.length, at, at + pieces[k].secs]); at += pieces[k].secs;
+      tracks.push(await storeTrack(id, pf, `${t.name} (${k + 1} of ${pieces.length})`, pieces[k].secs));
+    }
+    map.push(m); drop.push(t.key);
+  }
+  if (!drop.length) { clearToasts(); toast("Couldn't split these files. They may not be standard MP3s."); return; }
+  // Move every saved time (your place, line-ups, sync points) to the new part it now falls in.
+  const re = (ti, sec) => { const m = map[ti] || map[map.length - 1]; const e = m.find(x => sec < x[2]) || m[m.length - 1]; return [e[0], Math.max(0, sec - e[1])]; };
+  const [nt, ns] = re(b.audio.track || 0, b.audio.time || 0);
+  const patch = { audio: { tracks, track: nt, time: Math.round(ns) } };
+  if (b.follow && b.follow.pts) patch.follow = { ...b.follow, pts: b.follow.pts.map(([ti, t, f]) => { const [a, x] = re(ti, t); return [a, Math.round(x * 10) / 10, f]; }) };
+  if (b.sync && b.sync.d) patch.sync = { ...b.sync, d: encodeSync(decodeSync(b.sync).map(([ti, ms, o]) => { const [a, x] = re(ti, ms / 1000); return [a, x * 1000, o]; })) };
+  save(id, patch, { now: true });
+  for (const k of drop) { idb.del(k); delete S.haveLocal[k]; }
+  if (auBook && auBook.id === id) auBook = null;
+  clearToasts();
+  toast(Cloud.signedIn() ? "Split into parts under 50 MB. They're copying to your account, then your phone can download them." : "Split into parts under 50 MB. Turn on sync to copy them to your account and your phone.", null, 8000);
+  updateDock();
 }
 function askAudioLink(id){
   const b = S.books[id];
@@ -1435,8 +1543,8 @@ function saveAudioPos(force){
 au.addEventListener("timeupdate", () => { saveAudioPos(false); updateTimes(); followTick(false); });
 au.addEventListener("loadedmetadata", () => { updateTimes(); const b = auBook && S.books[auBook.id], t = b && b.audio.tracks[auBook.track]; if (t) setDur(t.key, au.duration); });
 au.addEventListener("seeked", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } followTick(true); });
-au.addEventListener("play", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } updateDock(); followTick(true); });
-au.addEventListener("pause", () => { saveAudioPos(true); updateDock(); followStopCap(); updateFollowPill(); });
+au.addEventListener("play", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } updateDock(); followTick(true); capSend(); });
+au.addEventListener("pause", () => { saveAudioPos(true); updateDock(); followStopCap(); updateFollowPill(); capSend(); });
 au.addEventListener("ended", async () => {
   const b = auBook && S.books[auBook.id]; if (!b) return;
   const nxt = auBook.track + 1;
@@ -1673,6 +1781,12 @@ function setVol(v){
   paintVol();
 }
 
+function bigRow(b){
+  const big = (b.audio?.tracks || []).filter(t => t.size > MAX_FILE);
+  if (!big.length) return "";
+  const can = big.filter(t => isMp3(t) && S.haveLocal[t.key]).length;
+  return `<div class="pl-row"><label>Phone</label>${can ? `<button class="btn primary" id="auSplit">Split big parts</button>` : ""}<span class="note">${big.length} part${big.length > 1 ? "s are" : " is"} over 50 MB, too big to copy to your account or phone. ${can ? `Splitting cuts ${big.length > 1 ? "them" : "it"} into smaller parts without changing the sound. Your place and line-ups are kept.` : "Open this book on the device that has the files to split them (MP3 only)."}</span></div>`;
+}
 function updateDock(){
   const el = $("#dock"); if (!el) return;
   if (!S.dock) { el.innerHTML = ""; return; }
@@ -1688,7 +1802,7 @@ function updateDock(){
       <div class="chips">${SPEEDS.map(x => `<button class="chip" data-rate="${x}" aria-pressed="${x === r}">${rateTxt(x)}</button>`).join("")}</div>${label ? `<span class="note">${label}</span>` : ""}</div>`;
   const volRow = `<div class="pl-row"><label>Volume</label><button class="ib" id="auMute" aria-label="Mute">${ICON.vol}</button>
       <input type="range" class="scrub vol" id="auVol" min="0" max="1" step="0.01" value="${shownVol() == null ? 1 : shownVol()}" aria-label="Volume"></div>`;
-  const popRow = `<div class="pl-row"><label>Pop-out</label><button class="btn" id="plPop">${prefs.get("capOn") ? "Hide pop-out text" : "Show pop-out text"}</button><span class="note">Colors and style under Aa.</span></div>`;
+  const popRow = `<div class="pl-row"><label>Pop-out</label><button class="btn" id="plPop">${prefs.get("capOn") ? "Hide pop-out text" : "Show pop-out text"}</button>${prefs.get("capOn") && prefs.get("capLock") ? `<button class="btn primary" id="plUnlock">Unlock pop-out</button>` : ""}<span class="note">Right-click it for more. Colors and style under Aa.</span></div>`;
 
   if (mode === "tts") {
     const n = TTS.count || document.querySelectorAll(".page [data-s]").length || 1;
@@ -1794,6 +1908,7 @@ function updateDock(){
         ${volRow}
         <div class="pl-row"><label>Skip</label><div class="chips">${SKIPS.map(s => `<button class="chip" data-skip="${s}" aria-pressed="${s === sk}">${s} sec</button>`).join("")}</div></div>
         ${followRow(b)}
+        ${bigRow(b)}
         <div class="pl-row"><label>Parts</label><button class="btn" id="auList">${S.showTracks ? "Hide parts" : `Show all ${tracks.length}`}</button></div>
         ${list}
         ${popRow}
@@ -1856,6 +1971,8 @@ function updateDock(){
   const vs = $("#auVol"); if (vs) vs.oninput = () => { paintRange(vs); setVol(+vs.value); };
   const mu = $("#auMute"); if (mu) mu.onclick = () => { const v = shownVol(); if (v > 0) { lastVol = v; setVol(0); } else setVol(lastVol || 0.7); };
   if (big && IOS && vol == null) Native.call({ op: "volumeGet" }).then(v => { vol = +v; paintVol(); }).catch(() => {});
+  const sp = $("#auSplit"); if (sp) sp.onclick = () => { sp.disabled = true; sp.textContent = "Splitting…"; splitBigParts(S.cur); };
+  const ul = $("#plUnlock"); if (ul) ul.onclick = () => capCmd("lock");
   const pp = $("#plPop"); if (pp) pp.onclick = () => { setCaption(!prefs.get("capOn")); const rp = $("#rPop"); if (rp) rp.setAttribute("aria-pressed", !!prefs.get("capOn")); updateDock(); };
   const add = $("#auAdd"); if (add) add.onclick = () => $("#audioFile").click();
   paintVol();
@@ -1891,7 +2008,7 @@ async function measureDurs(b){
 // can't be measured (iPhone doesn't load audio in the background).
 function notePlayingDur(b){
   const t = b.audio.tracks[auBook.track], d = au.duration;
-  if (t && isFinite(d) && d > 0 && Math.abs((durCache[t.key] || 0) - d) > 0.5) { setDur(t.key, d); keepDurs(b); }
+  if (t && !t.durExact && isFinite(d) && d > 0 && Math.abs((durCache[t.key] || 0) - d) > 0.5) { setDur(t.key, d); keepDurs(b); }
 }
 // Save the lengths with the book, so your other devices know them without measuring.
 function keepDurs(b){
@@ -2070,6 +2187,17 @@ function alignBook(c, tx){
   for (const [ti, ms, o] of pts) { const d = Math.round(ms / 100); enc.push([ti - pt, ti !== pt ? d : d - pd, o - po].map(v => v.toString(36)).join(",")); pt = ti; pd = d; po = o; }
   return { ok: true, coverage: covered, sync: { v: 1, total: ix.total, n: pts.length, d: enc.join(";"), at: Date.now() } };
 }
+// The timing map as [part, milliseconds, character position], and back.
+function decodeSync(s){
+  let ti = 0, d = 0, o = 0; const out = [];
+  for (const part of s.d.split(";")) { const [a, x, y] = part.split(",").map(v => parseInt(v, 36)); if (a) { ti += a; d = x; } else d += x; o += y; out.push([ti, d * 100, o]); }
+  return out;
+}
+function encodeSync(pts){
+  let pt = 0, pd = 0, po = 0; const enc = [];
+  for (const [ti, ms, o] of pts) { const d = Math.round(ms / 100); enc.push([ti - pt, ti !== pt ? d : d - pd, o - po].map(v => v.toString(36)).join(",")); pt = ti; pd = d; po = o; }
+  return enc.join(";");
+}
 function syncPoints(b, ix){
   const s = b.sync; if (!s || s.v !== 1 || !s.d || s.total !== ix.total) return [];
   if (syncPoints.cache && syncPoints.cache.d === s.d) return syncPoints.cache.pts;
@@ -2203,7 +2331,25 @@ function capPayload(){
     else if (c && c.kind === "pdf") hint = "Pop-out text works with EPUB and text books, or while a PDF is read aloud.";
   } else hint = "Open a book in Pagekeeper.";
   const playing = capNow.speaking || !!(auBook && !au.paused);
-  return { ...capCfg(), text, hint, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
+  return { ...capCfg(), text, hint, info: capInfo(), locked: !!prefs.get("capLock"), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
+}
+// "Chapter 12 · 3 h 10 min left" under the pop-out text.
+function chapterAt(c, page){
+  if (!c || c.kind !== "text") return "";
+  if (!c._heads) { c._heads = []; c.pages.forEach((blocks, i) => { for (const [t, x] of blocks) if (t === "h" && String(x).trim()) c._heads.push([i + 1, String(x).trim()]); }); }
+  let h = ""; for (const [p, x] of c._heads) { if (p > page) break; h = x; }
+  return h.length > 48 ? h.slice(0, 46) + "…" : h;
+}
+function capInfo(){
+  if (prefs.get("capInfo") === false || S.view !== "reader" || !S.cur) return "";
+  const bits = [], b = S.books[S.cur], ch = chapterAt(S.content[S.cur], S.page);
+  if (ch) bits.push(ch);
+  if (auBook && auBook.id === S.cur && b?.audio?.tracks?.length) {
+    const { off, total } = audioClock(b);
+    const m = Math.round(Math.max(0, total - (off[auBook.track] + (au.currentTime || 0))) / (au.playbackRate || 1) / 60);
+    bits.push(m < 60 ? `${m} min left` : `${Math.floor(m / 60)} h ${m % 60} min left`);
+  }
+  return bits.join(" · ");
 }
 function capSend(){
   if (!prefs.get("capOn")) return;
@@ -2227,7 +2373,14 @@ function capCmd(cmd){
     if (cmd === "close") { setCaption(false); if (S.sheet === "type") renderSheet(); return; }
     if (cmd === "play") { playPauseAny(); return; }
     if (cmd === "back") { if (auBook) skipBy(-skipSec()); return; }
-    if (cmd === "bigger" || cmd === "smaller") prefs.set("capSize", Math.max(12, Math.min(72, capCfg().size + (cmd === "bigger" ? 4 : -4))));
+    if (cmd === "lock") {
+      const on = !prefs.get("capLock"); prefs.set("capLock", on);
+      if (on) toast(TAURI ? "Pop-out locked. Clicks go through it now. To unlock, open the player or Aa in Pagekeeper and tap Unlock pop-out." : "Pop-out locked. Taps go through it now. To unlock, tap Unlock pop-out in the player or under Aa.", null, 8000);
+      capSend(); if (S.sheet === "type") renderSheet(); if (S.dock) updateDock(); return;
+    }
+    if (cmd === "autohide") prefs.set("capHide", !prefs.get("capHide"));
+    else if (cmd === "info") prefs.set("capInfo", prefs.get("capInfo") === false);
+    else if (cmd === "bigger" || cmd === "smaller") prefs.set("capSize", Math.max(12, Math.min(72, capCfg().size + (cmd === "bigger" ? 4 : -4))));
     else if (cmd === "style") prefs.set("capStyle", capCfg().style === "clear" ? "solid" : "clear");
     else if (cmd === "main") { const w = TAURI.window && TAURI.window.getCurrentWindow && TAURI.window.getCurrentWindow(); if (w) (async () => { try { await w.unminimize(); await w.show(); await w.setFocus(); } catch {} })(); return; }
     else return;
@@ -2236,7 +2389,9 @@ function capCmd(cmd){
 const capMenuItems = () => {
   const p = capPayload();
   return [p.audio || p.speaking ? ["play", p.playing ? "Pause" : "Play"] : null, p.audio ? ["back", "Back a few seconds"] : null,
-    ["bigger", "Bigger text"], ["smaller", "Smaller text"], ["style", p.style === "clear" ? "Show a background" : "Just the text"], ["close", "Close pop-out"]].filter(Boolean);
+    ["bigger", "Bigger text"], ["smaller", "Smaller text"], ["style", p.style === "clear" ? "Show a background" : "Just the text"],
+    ["lock", (p.locked ? "✓ " : "") + "Lock in place (taps go through)"], ["autohide", (p.autohide ? "✓ " : "") + "Hide when paused"], ["info", (p.showInfo ? "✓ " : "") + "Show chapter and time left"],
+    ["close", "Close pop-out"]].filter(Boolean);
 };
 function floatCapMenu(x, y){
   closeFloatCapMenu();
@@ -2260,7 +2415,7 @@ function renderFloatCap(p){
     const pos = prefs.get("capPos") || { x: 16, y: 90 };
     f.style.left = pos.x + "px"; f.style.top = pos.y + "px";
     const sz = prefs.get("capBox"); if (sz) { f.style.width = sz.w + "px"; f.style.height = sz.h + "px"; }
-    f.innerHTML = `<div class="fc-text"></div><span class="fc-grip" aria-hidden="true"></span>`;
+    f.innerHTML = `<div class="fc-text"></div><div class="fc-info"></div><span class="fc-grip" aria-hidden="true"></span>`;
     document.body.append(f);
     // drag anywhere on the panel; drag the corner to resize
     let drag = null, hold = 0;
@@ -2296,6 +2451,9 @@ function renderFloatCap(p){
   f.classList.toggle("speaking", !!p.speaking);
   f.classList.toggle("clear", p.style === "clear");
   f.classList.toggle("auto", !!p.auto);
+  f.classList.toggle("locked", !!p.locked);
+  f.classList.toggle("gone", !!p.hidden);
+  const inf = f.querySelector(".fc-info"); inf.textContent = p.info || ""; inf.hidden = !p.info;
   const box = f.querySelector(".fc-text");
   if (!p.text) box.innerHTML = `<span class="fc-hint">${esc(p.hint || "")}</span>`;
   else if (p.word) { const [s, n] = p.word; box.innerHTML = esc(p.text.slice(0, s)) + `<mark>${esc(p.text.slice(s, s + n))}</mark>` + esc(p.text.slice(s + n)); }
