@@ -2659,7 +2659,7 @@ if (TAURI) TAURI.event.listen("pk-sync-progress", e => { if (AS.run && e.payload
 // Does this book need syncing (never synced, synced the old quick way, or the text or parts changed)?
 function needsSync(b, c){
   const s = b.sync, tr = b.audio?.tracks || [];
-  return !s || s.v !== 2 || !s.d || (c && s.total !== textIndex(c).total) || (s.parts && s.parts !== tr.length);
+  return !s || s.v !== 2 || !s.u || !s.d || (c && s.total !== textIndex(c).total) || (s.parts && s.parts !== tr.length);   // no u: made before every sentence was double-checked
 }
 // On the PC, a book with its audiobook syncs by itself the first time it's opened. No buttons, no line-ups.
 async function maybeAutoSync(id){
@@ -2697,7 +2697,8 @@ async function autoSync(id, auto){
     for (let oi = 0; oi < order.length; oi++) {
       const i = order[oi], t = tracks[i]; AS.run.part = oi; AS.run.frac = 0;
       let heard = await idb.get("__tx2_" + t.key);   // parts already heard are kept, so a stopped sync picks up where it left off
-      if (heard && heard.words) { run.heard[i] = heard; if (oi === 0 || run.heard.filter(Boolean).length === 1) scheduleInterim(); continue; }
+      // heard and checked before (parts heard by an older version, without the check, get heard again)
+      if (heard && heard.words && heard.fix) { run.heard[i] = heard; if (oi === 0 || run.heard.filter(Boolean).length === 1) scheduleInterim(); continue; }
       {
         if (!AS.run.t0) { AS.run.t0 = Date.now(); AS.run.o0 = oi / tracks.length; }
         AS.run.stage = "send"; paintSync();
