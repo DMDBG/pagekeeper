@@ -4,12 +4,12 @@
 // network can reach it, and every request needs the 6-digit code shown on the PC.
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
-use tiny_http::{Header, Response, Server};
+use tiny_http::{Header, Response, Server, StatusCode};
 
 const PORTS: std::ops::RangeInclusive<u16> = 47811..=47820;
 static RUNNING: Mutex<Option<(Arc<Server>, u16)>> = Mutex::new(None);
@@ -88,12 +88,41 @@ fn serve(server: Arc<Server>, dir: PathBuf, code: String) {
             let _ = req.respond(Response::from_string(body).with_header(header("Content-Type", "application/json")));
         } else if let Some(name) = path.strip_prefix("/pk/f/") {
             match safe_name(name).ok().and_then(|_| File::open(dir.join(name)).ok()) {
-                Some(f) => {
-                    let _ = req.respond(
-                        Response::from_file(f)
-                            .with_header(header("Content-Type", "application/octet-stream"))
-                            .with_header(header("Content-Disposition", &format!("attachment; filename=\"{name}\""))),
-                    );
+                Some(mut f) => {
+                    // Send the size up front (so the phone shows real progress), and let a dropped
+                    // download pick up where it stopped ("Range"), with a tag that says it's the same file.
+                    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                    let mtime = f
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let etag = format!("\"{len}-{mtime}\"");
+                    let from = req
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("Range"))
+                        .and_then(|h| h.value.as_str().strip_prefix("bytes=").map(|r| r.to_string()))
+                        .and_then(|r| r.split('-').next().and_then(|n| n.trim().parse::<u64>().ok()))
+                        .filter(|n| *n > 0 && *n < len);
+                    let mut headers = vec![
+                        header("Content-Type", "application/octet-stream"),
+                        header("Content-Disposition", &format!("attachment; filename=\"{name}\"")),
+                        header("Accept-Ranges", "bytes"),
+                        header("ETag", &etag),
+                    ];
+                    let (status, start) = match from {
+                        Some(n) if f.seek(SeekFrom::Start(n)).is_ok() => {
+                            headers.push(header("Content-Range", &format!("bytes {n}-{}/{len}", len - 1)));
+                            (206, n)
+                        }
+                        _ => (200, 0),
+                    };
+                    let resp = Response::new(StatusCode(status), headers, f, Some((len - start) as usize), None)
+                        .with_chunked_threshold(usize::MAX);
+                    let _ = req.respond(resp);
                 }
                 None => {
                     let _ = req.respond(Response::from_string("Not shared.").with_status_code(404));

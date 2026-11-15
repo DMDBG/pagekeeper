@@ -1896,7 +1896,7 @@ async function getFromPC(id, ask){
     clearToasts(); toast("Done. The audiobook is on this iPhone and plays offline.", null, 7000);
   } catch (e) {
     clearToasts();
-    toast(esc(String((e && e.message) || e)), e && e.again ? { label: "Change PC", fn: () => getFromPC(id, true) } : null, 12000);
+    toast(esc(String((e && e.message) || e)) + (e && e.again ? "" : " Parts already done are kept."), e && e.again ? { label: "Change PC", fn: () => getFromPC(id, true) } : { label: "Try again", fn: () => getFromPC(id) }, 15000);
   } finally { WIFI.busy = false; if (S.cur === id) updateDock(); }
 }
 function bigRow(b){

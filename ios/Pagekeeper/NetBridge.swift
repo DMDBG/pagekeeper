@@ -132,32 +132,70 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
 
     /// Downloads to Caches/pkdl/<token>/<filename>; the page reads it from pagekeeper://app/__dl/<token>.
+    /// Downloads in progress. While any are running the screen stays on, so a long download
+    /// isn't cut off when the phone locks itself.
+    private static var active = 0
+
     func download(_ url: URL, progressId: String?, completion: @escaping (Result<[String: Any], Error>) -> Void) {
-        let task = Self.session.downloadTask(with: url) { [weak self] tmp, response, error in
-            DispatchQueue.main.async {
-                if let progressId { self?.observers[progressId] = nil }
-                if let error { completion(.failure(error)); return }
-                guard let tmp else { completion(.failure(URLError(.cannotCreateFile))); return }
-                if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                    completion(.failure(NSError(domain: "Pagekeeper", code: http.statusCode,
-                        userInfo: [NSLocalizedDescriptionKey: "The site said \(http.statusCode)."]))); return
-                }
-                do {
-                    let info = try Self.store(tmp, name: response?.suggestedFilename ?? url.lastPathComponent,
-                                              mime: response?.mimeType, source: response?.url ?? url)
-                    completion(.success(info))
-                } catch { completion(.failure(error)) }
-            }
+        var attempts = 0
+        var bgTask: UIBackgroundTaskIdentifier = .invalid
+        // A little extra time to finish if you switch apps mid-download.
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: "pk-download") {
+            UIApplication.shared.endBackgroundTask(bgTask); bgTask = .invalid
         }
-        if let progressId, let web = webView {
-            observers[progressId] = task.progress.observe(\.fractionCompleted) { [weak web] p, _ in
-                let frac = p.fractionCompleted
+        Self.active += 1
+        UIApplication.shared.isIdleTimerDisabled = true
+
+        func finish(_ result: Result<[String: Any], Error>) {
+            if let progressId { observers[progressId] = nil }
+            Self.active -= 1
+            if Self.active <= 0 { Self.active = 0; UIApplication.shared.isIdleTimerDisabled = false }
+            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask); bgTask = .invalid }
+            completion(result)
+        }
+
+        func start(_ resumeData: Data?) {
+            let handler: (URL?, URLResponse?, Error?) -> Void = { tmp, response, error in
+                // iOS deletes the downloaded file as soon as this handler returns, so move it now.
+                var stored: Result<[String: Any], Error>?
+                if error == nil {
+                    if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                        stored = .failure(NSError(domain: "Pagekeeper", code: http.statusCode,
+                            userInfo: [NSLocalizedDescriptionKey: "The site said \(http.statusCode)."]))
+                    } else if let tmp {
+                        stored = Result { try Self.store(tmp, name: response?.suggestedFilename ?? url.lastPathComponent,
+                                                         mime: response?.mimeType, source: response?.url ?? url) }
+                    }
+                }
                 DispatchQueue.main.async {
-                    web?.evaluateJavaScript("window.pkProgress && window.pkProgress(\(Self.js(progressId)), \(frac))")
+                    if let error {
+                        // A dropped connection picks up where it stopped (or starts over) a few times before giving up.
+                        let ns = error as NSError
+                        let data = ns.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+                        let flaky: [URLError.Code] = [.networkConnectionLost, .timedOut, .notConnectedToInternet, .cannotConnectToHost]
+                        if attempts < 6, let code = (error as? URLError)?.code, flaky.contains(code) {
+                            attempts += 1
+                            DispatchQueue.main.asyncAfter(deadline: .now() + Double(attempts)) { start(data) }
+                            return
+                        }
+                        finish(.failure(error)); return
+                    }
+                    finish(stored ?? .failure(URLError(.cannotCreateFile)))
                 }
             }
+            let task = resumeData.map { Self.session.downloadTask(withResumeData: $0, completionHandler: handler) }
+                ?? Self.session.downloadTask(with: url, completionHandler: handler)
+            if let progressId, let web = webView {
+                observers[progressId] = task.progress.observe(\.fractionCompleted) { [weak web] p, _ in
+                    let frac = p.fractionCompleted
+                    DispatchQueue.main.async {
+                        web?.evaluateJavaScript("window.pkProgress && window.pkProgress(\(Self.js(progressId)), \(frac))")
+                    }
+                }
+            }
+            task.resume()
         }
-        task.resume()
+        start(nil)
     }
 
     /// Moves a finished download into the downloads folder and describes it for the page.
