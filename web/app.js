@@ -1494,7 +1494,7 @@ function ttsSpeakPage(run, items){
         el.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
       }
       const lead = text.length - text.trimStart().length;
-      capNow.speaking = true; capNow.text = text.trim(); capNow.word = null; capSend();
+      capNow.speaking = true; capNow.text = text.trim(); capNow.book = S.cur; capNow.page = S.page; capNow.word = null; capSend();
       const u = makeUtterance(text.trim());
       let finished = false;
       const after = advance => {
@@ -1939,9 +1939,10 @@ async function followTick(force){
     const m = $("#rMain"), r = hit.getBoundingClientRect(), mr = m && m.getBoundingClientRect();
     if (mr && (r.top < mr.top + 40 || r.bottom > mr.bottom - 40)) hit.scrollIntoView({ block: "center", behavior: "smooth" });
   }
-  if (!au.paused) { capNow.speaking = true; capNow.follow = true; capNow.text = hit.textContent.trim(); capNow.word = null; capSend(); }
+  // The pop-out shows just this sentence, and keeps showing it while the audio is paused.
+  capNow.follow = true; capNow.speaking = !au.paused; capNow.text = hit.textContent.trim(); capNow.book = S.cur; capNow.page = S.page; capNow.word = null; capSend();
 }
-function followStopCap(){ if (capNow.follow) { capNow.follow = false; capNow.speaking = false; capSend(); } }
+function followStopCap(){ if (capNow.follow) { capNow.follow = false; capNow.speaking = false; capSend(); } }   // the last sentence stays up
 function followPick(e){
   const b = S.books[S.cur], c = S.content[S.cur];
   if (!auBook || auBook.id !== S.cur || !c) { S.syncPick = false; updateFollowPill(); return; }
@@ -2016,7 +2017,9 @@ function capPayload(){
   if (capNow.speaking) text = capNow.text;
   else if (S.view === "reader" && S.cur) {
     const c = S.content[S.cur];
-    if (c && c.kind === "text") text = c.pages[S.page - 1].map(b => b[1]).join("\n\n");
+    // One sentence at a time: the last one heard on this page, or else the first sentence of the page.
+    if (capNow.text && capNow.book === S.cur && capNow.page === S.page) text = capNow.text;
+    else if (c && c.kind === "text") { const first = document.querySelector(".page [data-s]"); text = first ? first.textContent.trim() : ""; }
     else if (c && c.kind === "pdf") hint = "Pop-out text works with EPUB and text books, or while a PDF is read aloud.";
   } else hint = "Open a book in Pagekeeper.";
   return { ...capCfg(), text, hint, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking };
