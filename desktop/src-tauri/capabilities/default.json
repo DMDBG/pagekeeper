@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "The reader and the pop-out text window can talk to each other; the pop-out can be dragged. Website windows get nothing.",
   "windows": ["main", "caption"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "permissions": ["core:default", "core:menu:default", "core:window:allow-start-dragging", "core:window:allow-set-focus", "core:window:allow-unminimize", "core:window:allow-show"]
 }

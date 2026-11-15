@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "autosync-5", items: [
+const WHATS_NEW = { id: "capmenu-6", items: [
+  "<b>Pop-out text menu:</b> right-click the pop-out (press and hold on iPhone) to close it, change the text size, switch the background, or play and pause.",
   "<b>Automatic sync is much faster:</b> a long audiobook now takes minutes instead of hours, and the player shows about how long is left.",
   "<b>Exact follow-along (Windows app):</b> in the full player, tap <b>Sync automatically</b>. Your PC listens to the audiobook once and matches it to the text, then the iPhone follows along exactly too.",
   "<b>Pop-out text</b> now shows one sentence at a time and moves along with the audiobook.",
@@ -2201,7 +2202,8 @@ function capPayload(){
     else if (c && c.kind === "text") { const first = document.querySelector(".page [data-s]"); text = first ? first.textContent.trim() : ""; }
     else if (c && c.kind === "pdf") hint = "Pop-out text works with EPUB and text books, or while a PDF is read aloud.";
   } else hint = "Open a book in Pagekeeper.";
-  return { ...capCfg(), text, hint, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking };
+  const playing = capNow.speaking || !!(auBook && !au.paused);
+  return { ...capCfg(), text, hint, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
 }
 function capSend(){
   if (!prefs.get("capOn")) return;
@@ -2218,7 +2220,38 @@ function setCaption(on){
 if (TAURI && TAURI.event) {
   TAURI.event.listen("pk-caption-ready", () => capSend());
   TAURI.event.listen("pk-caption-closed", () => { if (prefs.get("capOn")) { prefs.set("capOn", false); if (S.sheet === "type") renderSheet(); } });
+  TAURI.event.listen("pk-caption-cmd", e => capCmd(e.payload && e.payload.cmd));
 }
+// The pop-out's right-click menu (on iPhone, press and hold the panel).
+function capCmd(cmd){
+    if (cmd === "close") { setCaption(false); if (S.sheet === "type") renderSheet(); return; }
+    if (cmd === "play") { playPauseAny(); return; }
+    if (cmd === "back") { if (auBook) skipBy(-skipSec()); return; }
+    if (cmd === "bigger" || cmd === "smaller") prefs.set("capSize", Math.max(12, Math.min(72, capCfg().size + (cmd === "bigger" ? 4 : -4))));
+    else if (cmd === "style") prefs.set("capStyle", capCfg().style === "clear" ? "solid" : "clear");
+    else if (cmd === "main") { const w = TAURI.window && TAURI.window.getCurrentWindow && TAURI.window.getCurrentWindow(); if (w) (async () => { try { await w.unminimize(); await w.show(); await w.setFocus(); } catch {} })(); return; }
+    else return;
+    capSend(); if (S.sheet === "type") renderSheet();
+}
+const capMenuItems = () => {
+  const p = capPayload();
+  return [p.audio || p.speaking ? ["play", p.playing ? "Pause" : "Play"] : null, p.audio ? ["back", "Back a few seconds"] : null,
+    ["bigger", "Bigger text"], ["smaller", "Smaller text"], ["style", p.style === "clear" ? "Show a background" : "Just the text"], ["close", "Close pop-out"]].filter(Boolean);
+};
+function floatCapMenu(x, y){
+  closeFloatCapMenu();
+  const m = document.createElement("div"); m.id = "fcMenu"; m.setAttribute("role", "menu");
+  m.innerHTML = capMenuItems().map(([c, l]) => `<button role="menuitem" data-c="${c}">${esc(l)}</button>`).join("");
+  document.body.append(m);
+  m.style.left = Math.max(8, Math.min(innerWidth - m.offsetWidth - 8, x)) + "px";
+  m.style.top = Math.max(8, Math.min(innerHeight - m.offsetHeight - 8, y)) + "px";
+  m.onclick = e => { const b = e.target.closest("button"); if (!b) return; closeFloatCapMenu(); capCmd(b.dataset.c); };
+  setTimeout(() => document.addEventListener("pointerdown", capMenuAway, true), 0);
+  m.querySelector("button").focus();
+}
+function capMenuAway(e){ const m = $("#fcMenu"); if (m && !m.contains(e.target)) closeFloatCapMenu(); }
+function closeFloatCapMenu(){ const m = $("#fcMenu"); if (m) m.remove(); document.removeEventListener("pointerdown", capMenuAway, true); }
+document.addEventListener("keydown", e => { if (e.key === "Escape" && $("#fcMenu")) closeFloatCapMenu(); });
 /* In-app floating panel (iPhone and browser). */
 function renderFloatCap(p){
   let f = $("#floatcap");
@@ -2230,8 +2263,12 @@ function renderFloatCap(p){
     f.innerHTML = `<div class="fc-text"></div><span class="fc-grip" aria-hidden="true"></span>`;
     document.body.append(f);
     // drag anywhere on the panel; drag the corner to resize
-    let drag = null;
+    let drag = null, hold = 0;
+    f.addEventListener("contextmenu", e => { e.preventDefault(); drag = null; floatCapMenu(e.clientX, e.clientY); });
     f.addEventListener("pointerdown", e => {
+      if (e.button === 2) return;
+      clearTimeout(hold);
+      if (e.pointerType !== "mouse") hold = setTimeout(() => { drag = null; floatCapMenu(e.clientX, e.clientY); }, 600);
       const r = f.getBoundingClientRect();
       const resize = e.target.classList.contains("fc-grip");
       drag = { resize, sx: e.clientX, sy: e.clientY, x: r.left, y: r.top, w: r.width, h: r.height };
@@ -2240,6 +2277,7 @@ function renderFloatCap(p){
     f.addEventListener("pointermove", e => {
       if (!drag) return;
       const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      if (Math.abs(dx) + Math.abs(dy) > 8) clearTimeout(hold);
       if (drag.resize) { f.style.width = Math.max(160, drag.w + dx) + "px"; f.style.height = Math.max(54, drag.h + dy) + "px"; }
       else {
         f.style.left = Math.min(innerWidth - 60, Math.max(-f.offsetWidth + 60, drag.x + dx)) + "px";
@@ -2247,6 +2285,7 @@ function renderFloatCap(p){
       }
     });
     const end = () => {
+      clearTimeout(hold);
       if (!drag) return; drag = null;
       prefs.set("capPos", { x: parseInt(f.style.left), y: parseInt(f.style.top) });
       prefs.set("capBox", { w: f.offsetWidth, h: f.offsetHeight });
