@@ -9,7 +9,9 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "follow-dark-3", items: [
+const WHATS_NEW = { id: "autosync-4", items: [
+  "<b>Exact follow-along (Windows app):</b> in the full player, tap <b>Sync automatically</b>. Your PC listens to the audiobook once and matches it to the text, then the iPhone follows along exactly too.",
+  "<b>Pop-out text</b> now shows one sentence at a time and moves along with the audiobook.",
   "<b>Dark mode</b> is now on everywhere. Change it in Settings under Look.",
   "<b>Audiobooks follow along:</b> as your own audiobook plays, the pages turn and the sentence is highlighted. If it drifts, tap <b>Line up</b> in the player, then the sentence you're hearing.",
   "<b>Play/pause key:</b> pick any key in Settings. On Windows it can work even while you're in another app.",
@@ -1827,6 +1829,8 @@ function updateDock(){
       if (!followOn()) { clearHighlights(); fLast.el = null; followStopCap(); S.followHold = false; updateFollowPill(); } else followTick(true);
       updateDock();
     });
+    const sa = $("#syncAuto"); if (sa) sa.onclick = () => autoSync(S.cur);
+    const ss = $("#syncStop"); if (ss) ss.onclick = () => { stopAutoSync(); ss.disabled = true; ss.textContent = "Stopping…"; };
     const fl = $("#fLine"); if (fl) fl.onclick = async () => {
       if (!(await ensureLoaded())) return;
       S.syncPick = true; S.bigPlayer = false; updateDock(); updateFollowPill();
@@ -1916,7 +1920,12 @@ async function followTick(force){
   measureDurs(b);
   const { off, total: totalA } = audioClock(b);
   const at = off[auBook.track] + (au.currentTime || 0);
-  const pts = ((b.follow && b.follow.pts) || []).map(([ti, t, f]) => [(off[ti] ?? off[off.length - 1]) + t, f]);
+  const g = (ti, t) => (off[ti] ?? off[off.length - 1]) + t;
+  const manual = ((b.follow && b.follow.pts) || []).map(([ti, t, f]) => [g(ti, t), f]);
+  // Timing from automatic sync, with your own line-ups taking over near where you made them.
+  const auto = syncPoints(b, textIndex(c)).map(([ti, t, f]) => [g(ti, t), f])
+    .filter(([a, f]) => manual.every(([ma, mf]) => Math.abs(a - ma) > 30 && (a < ma ? f <= mf : f >= mf)));
+  const pts = auto.length ? auto.concat(manual) : manual;
   const frac = mapFrac(pts, at, totalA);
   const ix = textIndex(c);
   let page, inPage = 0;
@@ -1966,9 +1975,15 @@ function followPick(e){
 }
 function followRow(b){
   const on = followOn(), n = ((b.follow && b.follow.pts) || []).length;
+  const synced = !!(b.sync && b.sync.d), mine = !!(AS.run && AS.run.id === S.cur);
+  let auto = "";
+  if (on && TAURI) auto = mine
+    ? `<div class="pl-row"><label>Sync</label><span class="note" id="syncStatus" style="flex:1;min-width:180px">${esc(syncText())}</span><button class="btn ghost" id="syncStop">Stop</button></div>`
+    : `<div class="pl-row"><label>Sync</label><button class="btn ${synced ? "" : "primary"}" id="syncAuto" ${AS.run ? "disabled" : ""}>${AS.run ? "Syncing another book…" : synced ? "Sync again" : "Sync automatically"}</button><span class="note">${synced ? "Timing comes from the audio itself." : "Listens to the audiobook once on this PC for exact timing. Takes a while; you can keep reading."}</span></div>`;
+  else if (on) auto = `<p class="note fnote">${synced ? "Synced on your PC, so it follows the audio exactly." : "For exact timing, open this book in Pagekeeper on your PC and tap <b>Sync automatically</b>. It shows up here when it's done."}</p>`;
   return `<div class="pl-row"><label>Follow</label><div class="chips"><button class="chip" data-follow="1" aria-pressed="${on}">On</button><button class="chip" data-follow="0" aria-pressed="${!on}">Off</button></div>
     ${on ? `<button class="btn" id="fLine">Line up</button>${n ? `<button class="btn ghost" id="fReset">Reset ${n} line-up${n > 1 ? "s" : ""}</button>` : ""}` : ""}</div>
-    ${on ? `<p class="note fnote">Turns the pages and highlights the sentence as the audiobook plays. It starts as an estimate. If it's off, tap <b>Line up</b> while it plays, then tap the sentence you're hearing. A few line-ups through the book keep it close all the way.</p>` : ""}`;
+    ${on ? `<p class="note fnote">${synced ? "Turns the pages and highlights the sentence using the timing from automatic sync. If a spot is off, tap <b>Line up</b> while it plays, then the sentence you're hearing." : "Turns the pages and highlights the sentence as the audiobook plays. Until it's synced, it's an estimate. If it's off, tap <b>Line up</b> while it plays, then tap the sentence you're hearing."}</p>` : ""}${auto}`;
 }
 function updateFollowPill(){
   const r = $(".reader"); let el = $("#followPill");
@@ -1981,6 +1996,143 @@ function updateFollowPill(){
   const cx = $("#fpCancel"); if (cx) cx.onclick = () => { S.syncPick = false; updateFollowPill(); followTick(true); };
   const bk = $("#fpBack"); if (bk) bk.onclick = () => { S.followHold = false; updateFollowPill(); followTick(true); };
 }
+
+/* ---------- automatic sync (Windows app) ----------
+   The PC listens to the audiobook once with a speech recognizer that runs on this computer
+   (whisper.cpp), then matches the words it heard to the book's words. Runs of four words that
+   appear only once in the book and once in the audio are reliable matches; the longest chain
+   of them that runs forward through both gives exact timing points. The points are saved with
+   the book (a few dozen KB), so the iPhone follows along exactly too. */
+const normW = w => w.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]/g, "");
+const WORD_RE = /[\p{L}\p{N}][\p{L}\p{N}'’]*/gu;
+function bookWords(c){
+  const w = [], o = []; let n = 0;
+  for (const blocks of c.pages) for (const [t, x] of blocks) for (const q of (t === "h" ? [x] : splitS(x))) {
+    for (const m of q.matchAll(WORD_RE)) { const k = normW(m[0]); if (k) { w.push(k); o.push(n + m.index); } }
+    n += q.length;
+  }
+  return { w, o };
+}
+// tx: one list per part of [milliseconds, text] from the recognizer.
+function alignBook(c, tx){
+  const ix = textIndex(c), B = bookWords(c);
+  const tw = [], tt = [], tm = [];
+  tx.forEach((list, ti) => { for (const [ms, text] of list) for (const piece of String(text).split(/\s+/)) { const k = normW(piece); if (k) { tw.push(k); tt.push(ti); tm.push(ms); } } });
+  if (B.w.length < 50 || tw.length < 50) return { ok: false, msg: "There wasn't enough speech or text to match." };
+  const K = 4;
+  const grams = arr => { const m = new Map(); for (let i = 0; i + K <= arr.length; i++) { const g = arr.slice(i, i + K).join(" "); m.set(g, m.has(g) ? -1 : i); } return m; };
+  const bm = grams(B.w), tmap = grams(tw);
+  const pairs = [];   // [book word, transcript word] in transcript order
+  for (let j = 0; j + K <= tw.length; j++) {
+    const g = tw.slice(j, j + K).join(" ");
+    if (tmap.get(g) !== j) continue;
+    const i = bm.get(g); if (i >= 0) pairs.push([i, j]);
+  }
+  // Longest chain that moves forward in both the book and the audio.
+  const tails = [], prev = new Array(pairs.length).fill(-1);
+  pairs.forEach(([i], p) => {
+    let lo = 0, hi = tails.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (pairs[tails[mid]][0] < i) lo = mid + 1; else hi = mid; }
+    if (lo > 0) prev[p] = tails[lo - 1];
+    tails[lo] = p;
+  });
+  const chain = []; for (let p = tails.length ? tails[tails.length - 1] : -1; p >= 0; p = prev[p]) chain.push(pairs[p]);
+  chain.reverse();
+  if (chain.length < 20) return { ok: false, msg: "The audio didn't match this book's text. Check it's the same book, in English." };
+  // Keep a timing point about every 6 seconds, plus the first point of every part.
+  const pts = []; let lastT = -1, lastMs = -1e9;
+  for (const [i, j] of chain) {
+    const ti = tt[j], ms = tm[j];
+    if (ti !== lastT || ms - lastMs >= 6000) { pts.push([ti, ms, B.o[i]]); lastT = ti; lastMs = ms; }
+  }
+  const covered = (B.o[chain[chain.length - 1][0]] - B.o[chain[0][0]]) / ix.total;
+  // Packed as differences in base 36: part, tenths of a second, character position.
+  let pt = 0, pd = 0, po = 0; const enc = [];
+  for (const [ti, ms, o] of pts) { const d = Math.round(ms / 100); enc.push([ti - pt, ti !== pt ? d : d - pd, o - po].map(v => v.toString(36)).join(",")); pt = ti; pd = d; po = o; }
+  return { ok: true, coverage: covered, sync: { v: 1, total: ix.total, n: pts.length, d: enc.join(";"), at: Date.now() } };
+}
+function syncPoints(b, ix){
+  const s = b.sync; if (!s || s.v !== 1 || !s.d || s.total !== ix.total) return [];
+  if (syncPoints.cache && syncPoints.cache.d === s.d) return syncPoints.cache.pts;
+  let ti = 0, d = 0, o = 0; const pts = [];
+  for (const part of s.d.split(";")) {
+    const [a, x, y] = part.split(",").map(v => parseInt(v, 36));
+    if (a) { ti += a; d = x; } else d += x;
+    o += y; pts.push([ti, d / 10, o / ix.total]);
+  }
+  syncPoints.cache = { d: s.d, pts };
+  return pts;
+}
+
+const AS = { run: null };
+const tauriInvoke = (...a) => TAURI.core.invoke(...a);
+function syncText(){
+  const r = AS.run; if (!r) return "";
+  if (r.stage === "model") return `Getting the speech model (one time, about 148 MB)… ${Math.round(r.frac * 100)}%`;
+  if (r.stage === "send") return `Preparing part ${r.part + 1} of ${r.parts}…`;
+  if (r.stage === "listen") return `Listening to part ${r.part + 1} of ${r.parts}… ${Math.round(((r.part + r.frac) / r.parts) * 100)}% overall`;
+  if (r.stage === "match") return "Matching the words to the book…";
+  return "Starting…";
+}
+function paintSync(){ const el = $("#syncStatus"); if (el) el.textContent = syncText(); }
+if (TAURI) TAURI.event.listen("pk-sync-progress", e => { if (AS.run && e.payload) { AS.run.stage = e.payload.stage; AS.run.frac = +e.payload.frac || 0; paintSync(); } });
+
+async function autoSync(id){
+  if (!TAURI || AS.run) return;
+  const b = S.books[id]; const tracks = (b && b.audio && b.audio.tracks) || [];
+  if (!tracks.length) return;
+  let c; try { c = await loadContent(id); } catch { c = null; }
+  if (!c || c.kind !== "text") { toast("Automatic sync works with EPUB and text books."); return; }
+  await checkLocal(id);
+  const away = tracks.filter(t => !S.haveLocal[t.key] && !t.asset);
+  if (away.length) { toast(`${away.length} part${away.length > 1 ? "s aren't" : " isn't"} on this PC yet. Add the matching files first.`, null, 7000); return; }
+  AS.run = { id, stage: "start", frac: 0, part: 0, parts: tracks.length };
+  if (S.dock) updateDock();
+  toast("Syncing in the background. You can keep reading or listening; progress shows in the player.", null, 6000);
+  try {
+    await tauriInvoke("pk_sync_stop", { stop: false });
+    const st = await tauriInvoke("pk_sync_status");
+    if (!st.engine) throw new Error("The speech engine is missing from this install. Reinstall Pagekeeper.");
+    if (!st.model) { AS.run.stage = "model"; AS.run.frac = 0; paintSync(); await tauriInvoke("pk_sync_model"); }
+    const tx = [];
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i]; AS.run.part = i; AS.run.frac = 0;
+      let words = await idb.get("__tx_" + t.key);   // parts already heard are kept, so a stopped sync picks up where it left off
+      if (!words) {
+        AS.run.stage = "send"; paintSync();
+        let blob = await idb.get(t.key);
+        if (!blob && t.asset) blob = await fetchTrack(t);
+        if (!blob) throw new Error(`Part ${i + 1} isn't on this PC.`);
+        const name = await tauriInvoke("pk_put_begin", { ext: extOf(t.file || t.name || "") || "mp3" });
+        const STEP = 8 << 20;
+        for (let o = 0; o < blob.size; o += STEP) {
+          if (AS.stop) throw new Error("Stopped.");
+          const buf = new Uint8Array(await blob.slice(o, o + STEP).arrayBuffer());
+          await tauriInvoke("pk_put_chunk", buf, { headers: { "x-file": name } });
+        }
+        AS.run.stage = "listen"; paintSync();
+        words = await tauriInvoke("pk_transcribe", { file: name });
+        await idb.put("__tx_" + t.key, words);
+      }
+      tx.push(words);
+    }
+    AS.run.stage = "match"; paintSync();
+    await new Promise(r => setTimeout(r, 50));
+    const res = alignBook(c, tx);
+    if (!res.ok) throw new Error(res.msg);
+    save(id, { sync: res.sync }, { now: true });
+    if (S.cur === id) { fLast.el = null; followTick(true); }
+    toast(`Synced. Follow-along now uses the real timing (${Math.round(Math.min(1, res.coverage) * 100)}% of the book matched). It syncs to your iPhone too.`, null, 8000);
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/stopped/i.test(msg)) toast("Stopped. Parts already done are kept, so it picks up where it left off next time.", null, 6000);
+    else toast("Couldn't sync: " + esc(msg), null, 9000);
+  } finally {
+    AS.run = null; AS.stop = false;
+    if (S.dock) updateDock();
+  }
+}
+function stopAutoSync(){ if (!AS.run) return; AS.stop = true; tauriInvoke("pk_sync_stop", { stop: true }).catch(() => {}); }
 
 /* ---------- play / pause key ---------- */
 const keyPlay = () => prefs.get("keyPlay") || { code: "Space", key: " " };

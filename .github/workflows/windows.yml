@@ -28,6 +28,22 @@ jobs:
         working-directory: desktop
         run: npx --yes @tauri-apps/cli@2 icon ../ios/Pagekeeper/Assets.xcassets/AppIcon.appiconset/icon-1024.png
 
+      - name: Add the speech engine for automatic follow-along (whisper.cpp, open source, MIT)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download b5454 -R ggml-org/whisper.cpp -p whisper-bin-x64.zip -D "$RUNNER_TEMP"
+          7z x "$RUNNER_TEMP/whisper-bin-x64.zip" -o"$RUNNER_TEMP/wh" -y > /dev/null
+          dest="$GITHUB_WORKSPACE/desktop/src-tauri/whisper"
+          mkdir -p "$dest"
+          src=$(dirname "$(find "$RUNNER_TEMP/wh" -name whisper-cli.exe | head -n 1)")
+          cp "$src"/whisper-cli.exe "$src"/whisper.dll "$src"/ggml.dll "$src"/ggml-base.dll "$src"/ggml-cpu-*.dll "$dest/"
+          # the Visual C++ runtime, in case a PC doesn't have it
+          for d in msvcp140.dll vcruntime140.dll vcruntime140_1.dll; do cp "/c/Windows/System32/$d" "$dest/" || true; done
+          curl -sSL https://raw.githubusercontent.com/ggml-org/whisper.cpp/b5454/LICENSE -o "$dest/LICENSE-whisper.cpp.txt"
+          ls -l "$dest"
+
       - name: Build installer
         working-directory: desktop
         shell: bash

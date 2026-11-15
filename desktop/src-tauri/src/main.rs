@@ -4,6 +4,8 @@
 // in a Pagekeeper browser window whose downloads go straight into the library.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod sync;
+
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::io::Write;
@@ -296,7 +298,8 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption, pk_hotkey])
+        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption, pk_hotkey,
+            sync::pk_sync_status, sync::pk_sync_stop, sync::pk_sync_model, sync::pk_put_begin, sync::pk_put_chunk, sync::pk_transcribe])
         .run(tauri::generate_context!())
         .expect("error while running Pagekeeper");
 }
