@@ -17,6 +17,7 @@ uuid = { version = "1", features = ["v4"] }
 percent-encoding = "2"
 tauri-plugin-global-shortcut = "2"
 symphonia = { version = "0.5", features = ["all"] }
+tiny_http = "0.12"
 
 [profile.release]
 codegen-units = 1

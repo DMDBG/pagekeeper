@@ -23,6 +23,10 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         UIBackgroundModes: [audio]
+        # Wi-Fi transfer: lets Pagekeeper fetch audiobooks from Pagekeeper on your PC, on your home network.
+        NSLocalNetworkUsageDescription: Pagekeeper gets audiobooks from Pagekeeper on your PC over your home Wi-Fi.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

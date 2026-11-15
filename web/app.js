@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "capextras-7", items: [
+const WHATS_NEW = { id: "wifi-8", items: [
+  "<b>Send audiobooks to your iPhone over Wi-Fi:</b> in the PC player, tap <b>Send to iPhone over Wi-Fi</b>, then on the iPhone tap <b>Get from PC</b>. No account storage and no size limit.",
   "<b>Split big audiobook files:</b> MP3s over 50 MB are cut into smaller parts (same sound, nothing re-encoded), so they copy to your account and your phone. For parts you already added, tap <b>Split big parts</b> in the player.",
   "<b>Pop-out extras:</b> lock it in place so clicks go through, hide it while paused, and show the chapter and time left. Right-click the pop-out, or find them under Aa.",
   "<b>Pop-out text menu:</b> right-click the pop-out (press and hold on iPhone) to close it, change the text size, switch the background, or play and pause.",
@@ -1781,6 +1782,123 @@ function setVol(v){
   paintVol();
 }
 
+/* ---------- Wi-Fi transfer (PC → iPhone) ----------
+   The Windows app shares a book's audio files on your home network (see share.rs); the iPhone app
+   downloads them straight from the PC. No account storage, no size limit. Every request needs the
+   6-digit code shown on the PC. */
+const WIFI = { info: null, busy: false };
+const shareName = t => t.key.replace(/[^A-Za-z0-9_-]/g, "_") + "." + (extOf(t.file || t.name || "") || "mp3");
+const shareList = () => { try { return JSON.parse(localStorage.getItem("pk-share") || '{"books":{}}'); } catch { return { books: {} }; } };
+function wifiRow(b){
+  const tracks = b?.audio?.tracks || [];
+  if (TAURI) {
+    if (!tracks.length) return "";
+    const shared = !!(WIFI.info && shareList().books[S.cur]);
+    const how = shared ? `Ready. On your iPhone, open this book's player and tap <b>Get from PC</b>. If it asks, type <b>${esc(WIFI.info.ip)}:${WIFI.info.port}</b> and code <b>${esc(WIFI.info.code)}</b>.` : "Copies the audio straight to Pagekeeper on your iPhone over your home Wi-Fi. No account storage, no size limit.";
+    return `<div class="pl-row"><label>iPhone</label>${WIFI.busy ? "" : `<button class="btn ${shared ? "" : "primary"}" id="wifiShare">${shared ? "Share again" : "Send to iPhone over Wi-Fi"}</button>`}${WIFI.info && !WIFI.busy ? `<button class="btn ghost" id="wifiStop">Stop sharing</button>` : ""}<span class="note">${WIFI.busy ? "Getting the files ready…" : how}</span></div>`;
+  }
+  if (!IOS) return "";
+  const missing = !tracks.length || tracks.some(t => !S.haveLocal[t.key]);
+  if (!missing && !prefs.get("pcAddr")) return "";
+  return `<div class="pl-row"><label>From PC</label>${missing ? `<button class="btn primary" id="wifiGet">Get ${tracks.length ? "audio" : "the audiobook"} from PC</button>` : ""}${prefs.get("pcAddr") ? `<button class="btn ghost" id="wifiChange">Change PC</button>` : ""}<span class="note">Over your home Wi-Fi, from Pagekeeper on your PC. On the PC, open this book's player and tap <b>Send to iPhone over Wi-Fi</b> first.</span></div>`;
+}
+async function shareToPhone(id){
+  if (!TAURI || WIFI.busy) return;
+  const b = S.books[id], tracks = b?.audio?.tracks || [];
+  await checkLocal(id);
+  const here = tracks.filter(t => S.haveLocal[t.key]);
+  if (!here.length) { toast("This book's audio isn't on this PC."); return; }
+  WIFI.busy = true; updateDock();
+  try {
+    WIFI.info = await tauriInvoke("pk_share_start"); prefs.set("wifiOn", true);
+    for (let i = 0; i < here.length; i++) {
+      const t = here[i], name = shareName(t), blob = await idb.get(t.key); if (!blob) continue;
+      if (await tauriInvoke("pk_share_has", { name, size: blob.size })) continue;   // already shared
+      toast(`Getting part ${i + 1} of ${here.length} ready for your iPhone…`, null, 120000);
+      await tauriInvoke("pk_share_begin", { name });
+      const STEP = 8 << 20;
+      for (let o = 0; o < blob.size; o += STEP) await tauriInvoke("pk_share_chunk", new Uint8Array(await blob.slice(o, o + STEP).arrayBuffer()), { headers: { "x-file": name } });
+    }
+    const list = shareList();
+    list.books[id] = { title: b.title || "", author: b.author || "", tracks: tracks.map(t => ({ key: t.key, name: t.name, file: t.file || "", size: t.size || 0, dur: t.dur || durCache[t.key] || 0, f: S.haveLocal[t.key] ? shareName(t) : null })) };
+    localStorage.setItem("pk-share", JSON.stringify(list));
+    await tauriInvoke("pk_share_list", { json: JSON.stringify(list) });
+    clearToasts();
+    toast(`Ready. On your iPhone, open this book and tap <b>Get from PC</b>. Address ${esc(WIFI.info.ip)}:${WIFI.info.port}, code ${esc(WIFI.info.code)}. If Windows asks about the firewall, allow private networks.`, null, 15000);
+  } catch (e) { clearToasts(); toast("Couldn't share over Wi-Fi: " + esc(String((e && e.message) || e)), null, 9000); }
+  finally { WIFI.busy = false; updateDock(); }
+}
+async function stopSharing(){
+  try { await tauriInvoke("pk_share_stop"); } catch {}
+  WIFI.info = null; prefs.set("wifiOn", false); localStorage.removeItem("pk-share");
+  toast("Stopped sharing. The shared copies on this PC were removed.");
+  updateDock();
+}
+function askPC(addr, code){
+  return new Promise(done => {
+    const m = document.createElement("div"); m.className = "modal-back";
+    m.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>Connect to your PC</h3>
+      <p>On your PC, open this book in Pagekeeper, open the player, and tap <b>Send to iPhone over Wi-Fi</b>. Then type what it shows. Both need to be on the same Wi-Fi.</p>
+      <input id="pcAddr" inputmode="decimal" autocapitalize="off" autocorrect="off" placeholder="Address, like 192.168.1.20:47811" value="${esc(addr || "")}" aria-label="PC address">
+      <input id="pcCode" inputmode="numeric" maxlength="6" placeholder="6-digit code" value="${esc(code || "")}" aria-label="Code" style="margin-top:8px">
+      <p class="err" id="pcErr" hidden>Type the address (numbers and dots, then : and the port) and the 6-digit code.</p>
+      <div class="row"><button class="btn" data-x>Cancel</button><button class="btn primary" data-ok>Connect</button></div></div>`;
+    m.addEventListener("click", e => {
+      if (e.target === m || e.target.closest("[data-x]")) { m.remove(); done(null); }
+      if (e.target.closest("[data-ok]")) {
+        let a = $("#pcAddr", m).value.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, ""); const c = $("#pcCode", m).value.replace(/\D/g, "");
+        if (/^\d{1,3}(\.\d{1,3}){3}$/.test(a)) a += ":47811";
+        if (!/^\d{1,3}(\.\d{1,3}){3}:\d{2,5}$/.test(a) || c.length !== 6) { $("#pcErr", m).hidden = false; return; }
+        m.remove(); done([a, c]);
+      }
+    });
+    document.body.append(m); $("#pcAddr", m).focus();
+  });
+}
+async function getFromPC(id, ask){
+  if (!Native.ok || WIFI.busy) return;
+  let addr = prefs.get("pcAddr"), code = prefs.get("pcCode");
+  if (ask || !addr || !code) { const r = await askPC(addr, code); if (!r) return; [addr, code] = r; }
+  const base = `http://${addr}`;
+  WIFI.busy = true;
+  try {
+    toast("Connecting to your PC…", null, 30000);
+    let list;
+    try {
+      const r = await Native.text(`${base}/pk/list?c=${code}`);
+      if (r.status === 403) throw new Error("That code didn't work. Check the 6-digit code shown on your PC.");
+      list = JSON.parse(r.text);
+    } catch (e) {
+      const msg = /code|403/.test(String(e && e.message)) ? "That code didn't work. Check the 6-digit code shown on your PC." : "Couldn't reach your PC. Check that Pagekeeper is open there with sharing on, and that both are on the same Wi-Fi. If iPhone asked about finding devices on your network, allow it and try again.";
+      throw Object.assign(new Error(msg), { again: true });
+    }
+    prefs.set("pcAddr", addr); prefs.set("pcCode", code);
+    const b = S.books[id];
+    const entry = list.books[id] || Object.values(list.books).find(x => x.title && x.title === b.title);
+    if (!entry) throw new Error("Your PC isn't sharing this book yet. On the PC, open it, open the player, and tap Send to iPhone over Wi-Fi.");
+    let tracks = b.audio?.tracks || [];
+    if (!tracks.length) {
+      tracks = entry.tracks.map(t => ({ name: t.name, file: t.file, key: t.key, asset: null, size: t.size, ...(t.dur ? { dur: t.dur } : {}) }));
+      save(id, { audio: { tracks, track: 0, time: 0 } }, { now: true });
+    }
+    await checkLocal(id);
+    const src = t => entry.tracks.find(x => x.key === t.key) || entry.tracks.find(x => x.name === t.name && x.size === t.size);
+    const todo = tracks.filter(t => !S.haveLocal[t.key] && src(t) && src(t).f);
+    if (!todo.length) { clearToasts(); toast(tracks.every(t => S.haveLocal[t.key]) ? "All the audio is already on this iPhone." : "Your PC doesn't have the missing parts either."); return; }
+    for (let i = 0; i < todo.length; i++) {
+      const t = todo[i]; let last = -1;
+      const show = f => { const p = Math.floor(f * 20) * 5; if (p !== last) { last = p; toast(`Getting part ${i + 1} of ${todo.length} from your PC… ${p}%`, null, 120000); } };
+      show(0);
+      const file = await Native.file(`${base}/pk/f/${src(t).f}?c=${code}`, show);
+      await idb.put(t.key, file); S.haveLocal[t.key] = true;
+      if (S.cur === id) updateDock();
+    }
+    clearToasts(); toast("Done. The audiobook is on this iPhone and plays offline.", null, 7000);
+  } catch (e) {
+    clearToasts();
+    toast(esc(String((e && e.message) || e)), e && e.again ? { label: "Change PC", fn: () => getFromPC(id, true) } : null, 12000);
+  } finally { WIFI.busy = false; if (S.cur === id) updateDock(); }
+}
 function bigRow(b){
   const big = (b.audio?.tracks || []).filter(t => t.size > MAX_FILE);
   if (!big.length) return "";
@@ -1835,6 +1953,7 @@ function updateDock(){
         ${volRow}
         <div class="pl-row"><label>Voice</label><select id="ttsVoiceSel" aria-label="Voice"><option value="">Device default</option>${voices.map(v => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === want ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`).join("")}</select></div>
         <div class="pl-row"><label>Highlight</label><div class="chips">${[["sentence","Sentence"],["word","Word"],["off","Off"]].map(([k, l]) => `<button class="chip" data-hl="${k}" aria-pressed="${hlMode === k}">${l}</button>`).join("")}</div></div>
+        ${wifiRow(b)}
         ${popRow}
       </div>`;
     }
@@ -1911,6 +2030,7 @@ function updateDock(){
         ${bigRow(b)}
         <div class="pl-row"><label>Parts</label><button class="btn" id="auList">${S.showTracks ? "Hide parts" : `Show all ${tracks.length}`}</button></div>
         ${list}
+        ${wifiRow(b)}
         ${popRow}
       </div>`;
     }
@@ -1971,6 +2091,10 @@ function updateDock(){
   const vs = $("#auVol"); if (vs) vs.oninput = () => { paintRange(vs); setVol(+vs.value); };
   const mu = $("#auMute"); if (mu) mu.onclick = () => { const v = shownVol(); if (v > 0) { lastVol = v; setVol(0); } else setVol(lastVol || 0.7); };
   if (big && IOS && vol == null) Native.call({ op: "volumeGet" }).then(v => { vol = +v; paintVol(); }).catch(() => {});
+  const ws = $("#wifiShare"); if (ws) ws.onclick = () => shareToPhone(S.cur);
+  const wx = $("#wifiStop"); if (wx) wx.onclick = stopSharing;
+  const wg = $("#wifiGet"); if (wg) wg.onclick = () => getFromPC(S.cur);
+  const wc = $("#wifiChange"); if (wc) wc.onclick = () => getFromPC(S.cur, true);
   const sp = $("#auSplit"); if (sp) sp.onclick = () => { sp.disabled = true; sp.textContent = "Splitting…"; splitBigParts(S.cur); };
   const ul = $("#plUnlock"); if (ul) ul.onclick = () => capCmd("lock");
   const pp = $("#plPop"); if (pp) pp.onclick = () => { setCaption(!prefs.get("capOn")); const rp = $("#rPop"); if (rp) rp.setAttribute("aria-pressed", !!prefs.get("capOn")); updateDock(); };
@@ -2500,7 +2624,8 @@ async function boot(){
   S.net = Cloud.signedIn() ? (navigator.onLine === false ? "offline" : "syncing") : "local";
   render();
   syncNow();
-  if (prefs.get("capOn") && TAURI) setCaption(true);   // the Windows pop-out comes back where you left it on
+  if (prefs.get("capOn") && TAURI) setCaption(true);
+  if (TAURI && prefs.get("wifiOn")) tauriInvoke("pk_share_start").then(i => { WIFI.info = i; if (S.dock) updateDock(); }).catch(() => {});   // keep sharing what you shared before   // the Windows pop-out comes back where you left it on
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 boot();
