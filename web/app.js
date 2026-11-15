@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "wifi-8", items: [
+const WHATS_NEW = { id: "m4b-9", items: [
+  "<b>M4B audiobooks split too:</b> big M4B and M4A files are now cut into smaller parts without changing the sound, so they can go to your iPhone. Sending over Wi-Fi does this for you.",
   "<b>Send audiobooks to your iPhone over Wi-Fi:</b> in the PC player, tap <b>Send to iPhone over Wi-Fi</b>, then on the iPhone tap <b>Get from PC</b>. No account storage and no size limit.",
   "<b>Split big audiobook files:</b> MP3s over 50 MB are cut into smaller parts (same sound, nothing re-encoded), so they copy to your account and your phone. For parts you already added, tap <b>Split big parts</b> in the player.",
   "<b>Pop-out extras:</b> lock it in place so clicks go through, hide it while paused, and show the chapter and time left. Right-click the pop-out, or find them under Aa.",
@@ -778,7 +779,7 @@ function renderSettings(el){
 
 /* ---------- native bridge (iPhone app): downloads without leaving the app ---------- */
 const progressFns = {};
-window.pkProgress = (id, frac) => { const f = progressFns[id]; if (f) f(frac); };
+window.pkProgress = (id, frac) => { const f = progressFns[id]; if (f) f(Math.max(0, Math.min(1, +frac || 0))); };
 const IOS = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pk);
 const TAURI = window.__TAURI__ && window.__TAURI__.core ? window.__TAURI__ : null;   // the Windows app
 const Native = {
@@ -1337,12 +1338,12 @@ async function addAudio(files, id = S.cur, quiet = false){
   for (const f of list) {
     // MP3s over the upload limit are cut into smaller parts, so they can copy to your account and your phone.
     let pieces = null;
-    if (f.size > MAX_FILE && isMp3(f)) { if (!quiet) toast(`Splitting “${esc(f.name)}” into smaller parts…`, null, 120000); pieces = await splitMp3(f).catch(() => null); }
+    if (f.size > MAX_FILE && canSplit(f)) { if (!quiet) toast(`Splitting “${esc(f.name)}” into smaller parts…`, null, 120000); pieces = await splitAudio(f).catch(() => null); }
     if (pieces && pieces.length > 1) {
       split++;
       const base = f.name.replace(/\.[^.]+$/, "");
       for (let k = 0; k < pieces.length; k++) {
-        const pf = new File([pieces[k].blob], `${base} (${k + 1} of ${pieces.length}).mp3`, { type: "audio/mpeg" });
+        const pf = new File([pieces[k].blob], `${base} (${k + 1} of ${pieces.length}).${pieceExt(f)}`, { type: isMp3(f) ? "audio/mpeg" : "audio/mp4" });
         tracks.push(await storeTrack(id, pf, `${base} (${k + 1} of ${pieces.length})`, pieces[k].secs));
       }
       continue;
@@ -1354,7 +1355,7 @@ async function addAudio(files, id = S.cur, quiet = false){
   save(id, { audio: fresh ? { tracks, track: 0, time: 0 } : { tracks } }, { now: true });
   if (quiet) { if (S.cur === id) updateDock(); return; }
   clearToasts();
-  if (split) toast(`Big MP3 files were split into parts under 50 MB, so they can copy to your account and your phone.`, null, 7000);
+  if (split) toast(`Big audio files were split into parts under 50 MB, so they can copy to your account and your phone.`, null, 7000);
   else toast(big && Cloud.signedIn() ? `Added. ${big} file${big > 1 ? "s are" : " is"} over 50 MB and stay${big > 1 ? "" : "s"} on this device; your listening spot still syncs.` : Cloud.signedIn() ? "Audio added. It's copying to your account." : "Audio added.");
   auBook = null; updateDock();
   if (big && Cloud.signedIn() && !b.audio?.url) askAudioLink(id);
@@ -1369,6 +1370,89 @@ async function storeTrack(id, f, name, secs){
   return t;
 }
 const isMp3 = f => /\.mp3$/i.test(f.file || f.name || "") || f.type === "audio/mpeg";
+const isM4 = f => /\.(m4b|m4a|mp4|aac)$/i.test(f.file || f.name || "") || /audio\/(mp4|x-m4b|x-m4a|aac)/.test(f.type || "");
+const canSplit = f => isMp3(f) || isM4(f);
+// Pieces of an MP3 stay MP3; pieces of an M4B are M4A files.
+const splitAudio = f => isMp3(f) ? splitMp3(f) : splitM4a(f);
+const pieceExt = f => isMp3(f) ? "mp3" : "m4a";
+/* Cut an M4B / M4A audiobook into pieces under the upload limit, without re-encoding.
+   An M4B is a list of small compressed audio packets plus a table saying where each one is. Each
+   piece gets the packets for its stretch of the book and a new table, so the sound is unchanged.
+   Chapter markers aren't carried over. */
+async function splitM4a(file, target = 45 * 1024 * 1024){
+  const rd = async (a, n) => new DataView(await file.slice(a, a + n).arrayBuffer());
+  // find the "moov" box (the tables) at the top level of the file
+  let pos = 0, moov = null;
+  while (pos + 8 <= file.size) {
+    const h = await rd(pos, 16); let size = h.getUint32(0); const type = String.fromCharCode(h.getUint8(4), h.getUint8(5), h.getUint8(6), h.getUint8(7)); let hl = 8;
+    if (size === 1) { size = h.getUint32(8) * 2 ** 32 + h.getUint32(12); hl = 16; } else if (size === 0) size = file.size - pos;
+    if (size < hl) return null;
+    if (type === "moov") { moov = new Uint8Array(await file.slice(pos, pos + size).arrayBuffer()); break; }
+    pos += size;
+  }
+  if (!moov) return null;
+  const dv = new DataView(moov.buffer, moov.byteOffset, moov.byteLength);
+  const kids = (a, b) => { const out = []; let p = a; while (p + 8 <= b) { let s = dv.getUint32(p); const t = String.fromCharCode(moov[p + 4], moov[p + 5], moov[p + 6], moov[p + 7]); let hl = 8; if (s === 1) { s = dv.getUint32(p + 8) * 2 ** 32 + dv.getUint32(p + 12); hl = 16; } if (s < hl || p + s > b) break; out.push({ t, a: p, d: p + hl, b: p + s }); p += s; } return out; };
+  const find = (list, t) => list.find(x => x.t === t);
+  let st = null, ts = 0;
+  for (const trak of kids(8, moov.length).filter(x => x.t === "trak")) {
+    const mdia = find(kids(trak.d, trak.b), "mdia"); if (!mdia) continue;
+    const mk = kids(mdia.d, mdia.b), hdlr = find(mk, "hdlr"), mdhd = find(mk, "mdhd"), minf = find(mk, "minf");
+    if (!hdlr || !mdhd || !minf || String.fromCharCode(...moov.subarray(hdlr.d + 8, hdlr.d + 12)) !== "soun") continue;
+    ts = moov[mdhd.d] === 1 ? dv.getUint32(mdhd.d + 20) : dv.getUint32(mdhd.d + 12);
+    const stbl = find(kids(minf.d, minf.b), "stbl"); if (!stbl) continue;
+    st = {}; for (const k of kids(stbl.d, stbl.b)) st[k.t] = k;
+    break;
+  }
+  if (!st || !st.stsd || !st.stts || !st.stsc || !st.stsz || !(st.stco || st.co64) || !ts) return null;
+  // sample sizes
+  const fixed = dv.getUint32(st.stsz.d + 4), n = dv.getUint32(st.stsz.d + 8);
+  const size = new Uint32Array(n); for (let i = 0; i < n; i++) size[i] = fixed || dv.getUint32(st.stsz.d + 12 + 4 * i);
+  // sample durations
+  const delta = new Uint32Array(n); { let k = 0; const c = dv.getUint32(st.stts.d + 4); for (let e = 0; e < c; e++) { const cnt = dv.getUint32(st.stts.d + 8 + 8 * e), d = dv.getUint32(st.stts.d + 12 + 8 * e); for (let j = 0; j < cnt && k < n; j++) delta[k++] = d; } }
+  // where each sample is in the file: walk the chunks
+  const co = st.co64 || st.stco, wide = !!st.co64, nc = dv.getUint32(co.d + 4);
+  const chunkAt = c => wide ? dv.getUint32(co.d + 8 + 8 * c) * 2 ** 32 + dv.getUint32(co.d + 12 + 8 * c) : dv.getUint32(co.d + 8 + 4 * c);
+  const sc = dv.getUint32(st.stsc.d + 4), runs = []; for (let e = 0; e < sc; e++) runs.push([dv.getUint32(st.stsc.d + 8 + 12 * e) - 1, dv.getUint32(st.stsc.d + 12 + 12 * e)]);
+  const off = new Float64Array(n); { let s = 0; for (let c = 0, r = 0; c < nc && s < n; c++) { while (r + 1 < runs.length && runs[r + 1][0] <= c) r++; let o = chunkAt(c); for (let j = 0; j < runs[r][1] && s < n; j++) { off[s] = o; o += size[s]; s++; } } }
+  const stsd = moov.slice(st.stsd.a, st.stsd.b);
+  // pick the pieces
+  const cuts = []; { let a = 0, bytes = 0; for (let i = 0; i < n; i++) { if (bytes + size[i] > target && i > a) { cuts.push([a, i]); a = i; bytes = 0; } bytes += size[i]; } cuts.push([a, n]); }
+  if (cuts.length < 2) return null;
+  // build each piece: ftyp, moov (tables for just these samples), mdat (the samples)
+  const u32 = v => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255], u16 = v => [(v >>> 8) & 255, v & 255];
+  const str = s => [...s].map(c => c.charCodeAt(0));
+  const cat = parts => { let L = 0; for (const p of parts) L += p.length; const o = new Uint8Array(L); let q = 0; for (const p of parts) { o.set(p, q); q += p.length; } return o; };
+  const box = (t, ...parts) => { const body = cat(parts.map(p => p instanceof Uint8Array ? p : Uint8Array.from(p))); return cat([Uint8Array.from([...u32(body.length + 8), ...str(t)]), body]); };
+  const matrix = [...u32(0x10000), ...u32(0), ...u32(0), ...u32(0), ...u32(0x10000), ...u32(0), ...u32(0), ...u32(0), ...u32(0x40000000)];
+  return cuts.map(([a, b]) => {
+    const cnt = b - a; let dur = 0, bytes = 0; for (let i = a; i < b; i++) { dur += delta[i]; bytes += size[i]; }
+    const sttsE = []; for (let i = a; i < b;) { let j = i; while (j < b && delta[j] === delta[i]) j++; sttsE.push(...u32(j - i), ...u32(delta[i])); i = j; }
+    const szs = new Uint8Array(cnt * 4); const sdv = new DataView(szs.buffer); for (let i = a; i < b; i++) sdv.setUint32((i - a) * 4, size[i]);
+    const ftyp = box("ftyp", str("M4A "), u32(0), str("M4A mp42isom"));
+    const build = mdatAt => box("moov",
+      box("mvhd", u32(0), u32(0), u32(0), u32(ts), u32(dur), u32(0x10000), u16(0x100), new Array(10).fill(0), matrix, new Array(24).fill(0), u32(2)),
+      box("trak",
+        box("tkhd", u32(7), u32(0), u32(0), u32(1), u32(0), u32(dur), new Array(8).fill(0), u16(0), u16(0), u16(0x100), u16(0), matrix, u32(0), u32(0)),
+        box("mdia",
+          box("mdhd", u32(0), u32(0), u32(0), u32(ts), u32(dur), u16(0x55c4), u16(0)),
+          box("hdlr", u32(0), u32(0), str("soun"), new Array(12).fill(0), str("SoundHandler"), [0]),
+          box("minf",
+            box("smhd", u32(0), u16(0), u16(0)),
+            box("dinf", box("dref", u32(0), u32(1), box("url ", u32(1)))),
+            box("stbl", stsd,
+              box("stts", u32(0), u32(sttsE.length / 8), sttsE),
+              box("stsc", u32(0), u32(1), u32(1), u32(cnt), u32(1)),
+              box("stsz", u32(0), u32(0), u32(cnt), szs),
+              box("stco", u32(0), u32(1), u32(mdatAt)))))));
+    const moovLen = build(0).length, mdatAt = ftyp.length + moovLen + 8;
+    // the sample data, as slices of the original file (nothing is copied until it's saved)
+    const parts = [ftyp, build(mdatAt), Uint8Array.from([...u32(bytes + 8), ...str("mdat")])];
+    for (let i = a; i < b;) { const s0 = off[i]; let e = off[i] + size[i], j = i + 1; while (j < b && off[j] === e) { e += size[j]; j++; } parts.push(file.slice(s0, e)); i = j; }
+    return { blob: new Blob(parts, { type: "audio/mp4" }), secs: dur / ts };
+  });
+}
+
 /* Cut an MP3 into pieces under the upload limit. MP3 is a chain of small independent frames, so the
    cuts fall between frames: nothing is re-encoded, nothing is lost, and it's quick. Each piece's exact
    length comes from counting its frames. */
@@ -1412,29 +1496,29 @@ async function splitMp3(file, target = 45 * 1024 * 1024){
   return out.map(x => ({ blob: file.slice(x.a, x.b, "audio/mpeg"), secs: x.secs }));
 }
 // Parts already added that are too big to copy: split them, keeping your place, line-ups and sync timing.
-async function splitBigParts(id){
+async function splitBigParts(id, quiet){
   const b = S.books[id]; const old = b?.audio?.tracks || []; if (!old.length) return;
   await checkLocal(id);
-  const todo = old.map((t, i) => t.size > MAX_FILE && isMp3(t) && S.haveLocal[t.key] ? i : -1).filter(i => i >= 0);
-  if (!todo.length) { toast("No big MP3 parts on this device to split."); return; }
+  const todo = old.map((t, i) => t.size > MAX_FILE && canSplit(t) && S.haveLocal[t.key] ? i : -1).filter(i => i >= 0);
+  if (!todo.length) { if (!quiet) toast("No big MP3 or M4B parts on this device to split."); return false; }
   if (auBook && auBook.id === id) { au.pause(); saveAudioPos(true); }
   const tracks = [], map = [], drop = [];
   for (let i = 0; i < old.length; i++) {
     const t = old[i];
     if (!todo.includes(i)) { map.push([[tracks.length, 0, Infinity]]); tracks.push(t); continue; }
-    toast(`Splitting part ${i + 1} of ${old.length}…`, null, 120000);
+    toast(`Splitting ${old.length > 1 ? `part ${i + 1} of ${old.length}` : "the audiobook"} into smaller parts…`, null, 300000);
     const blob = await idb.get(t.key);
-    const pieces = blob ? await splitMp3(blob).catch(() => null) : null;
+    const pieces = blob ? await (isMp3(t) ? splitMp3(blob) : splitM4a(blob)).catch(() => null) : null;
     if (!pieces || pieces.length < 2) { map.push([[tracks.length, 0, Infinity]]); tracks.push(t); continue; }
     const m = []; let at = 0;
     for (let k = 0; k < pieces.length; k++) {
-      const pf = new File([pieces[k].blob], `${t.name} (${k + 1} of ${pieces.length}).mp3`, { type: "audio/mpeg" });
+      const pf = new File([pieces[k].blob], `${t.name} (${k + 1} of ${pieces.length}).${pieceExt(t)}`, { type: isMp3(t) ? "audio/mpeg" : "audio/mp4" });
       m.push([tracks.length, at, at + pieces[k].secs]); at += pieces[k].secs;
       tracks.push(await storeTrack(id, pf, `${t.name} (${k + 1} of ${pieces.length})`, pieces[k].secs));
     }
     map.push(m); drop.push(t.key);
   }
-  if (!drop.length) { clearToasts(); toast("Couldn't split these files. They may not be standard MP3s."); return; }
+  if (!drop.length) { clearToasts(); toast("Couldn't split these files. They may not be standard MP3 or M4B files."); return false; }
   // Move every saved time (your place, line-ups, sync points) to the new part it now falls in.
   const re = (ti, sec) => { const m = map[ti] || map[map.length - 1]; const e = m.find(x => sec < x[2]) || m[m.length - 1]; return [e[0], Math.max(0, sec - e[1])]; };
   const [nt, ns] = re(b.audio.track || 0, b.audio.time || 0);
@@ -1445,6 +1529,7 @@ async function splitBigParts(id){
   for (const k of drop) { idb.del(k); delete S.haveLocal[k]; }
   if (auBook && auBook.id === id) auBook = null;
   clearToasts();
+  if (quiet) { updateDock(); return true; }
   toast(Cloud.signedIn() ? "Split into parts under 50 MB. They're copying to your account, then your phone can download them." : "Split into parts under 50 MB. Turn on sync to copy them to your account and your phone.", null, 8000);
   updateDock();
 }
@@ -1804,12 +1889,15 @@ function wifiRow(b){
 }
 async function shareToPhone(id){
   if (!TAURI || WIFI.busy) return;
-  const b = S.books[id], tracks = b?.audio?.tracks || [];
   await checkLocal(id);
-  const here = tracks.filter(t => S.haveLocal[t.key]);
-  if (!here.length) { toast("This book's audio isn't on this PC."); return; }
+  if (!(S.books[id]?.audio?.tracks || []).some(t => S.haveLocal[t.key])) { toast("This book's audio isn't on this PC."); return; }
   WIFI.busy = true; updateDock();
   try {
+    // Big files are cut into parts first: an iPhone can't take in a file of a gigabyte or more in one go.
+    if ((S.books[id].audio.tracks || []).some(t => t.size > MAX_FILE && canSplit(t) && S.haveLocal[t.key])) await splitBigParts(id, true);
+    const b = S.books[id], tracks = b?.audio?.tracks || [];
+    await checkLocal(id);
+    const here = tracks.filter(t => S.haveLocal[t.key]);
     WIFI.info = await tauriInvoke("pk_share_start"); prefs.set("wifiOn", true);
     for (let i = 0; i < here.length; i++) {
       const t = here[i], name = shareName(t), blob = await idb.get(t.key); if (!blob) continue;
@@ -1883,6 +1971,8 @@ async function getFromPC(id, ask){
     }
     await checkLocal(id);
     const src = t => entry.tracks.find(x => x.key === t.key) || entry.tracks.find(x => x.name === t.name && x.size === t.size);
+    const huge = tracks.filter(t => !S.haveLocal[t.key] && src(t) && src(t).f && (src(t).size || 0) > 400 * 1024 * 1024);
+    if (huge.length) throw new Error("A part on your PC is too big for the iPhone to take in one go. On the PC, open the player and tap Send to iPhone over Wi-Fi again: it splits big files into smaller parts first.");
     const todo = tracks.filter(t => !S.haveLocal[t.key] && src(t) && src(t).f);
     if (!todo.length) { clearToasts(); toast(tracks.every(t => S.haveLocal[t.key]) ? "All the audio is already on this iPhone." : "Your PC doesn't have the missing parts either."); return; }
     for (let i = 0; i < todo.length; i++) {
@@ -1902,8 +1992,8 @@ async function getFromPC(id, ask){
 function bigRow(b){
   const big = (b.audio?.tracks || []).filter(t => t.size > MAX_FILE);
   if (!big.length) return "";
-  const can = big.filter(t => isMp3(t) && S.haveLocal[t.key]).length;
-  return `<div class="pl-row"><label>Phone</label>${can ? `<button class="btn primary" id="auSplit">Split big parts</button>` : ""}<span class="note">${big.length} part${big.length > 1 ? "s are" : " is"} over 50 MB, too big to copy to your account or phone. ${can ? `Splitting cuts ${big.length > 1 ? "them" : "it"} into smaller parts without changing the sound. Your place and line-ups are kept.` : "Open this book on the device that has the files to split them (MP3 only)."}</span></div>`;
+  const can = big.filter(t => canSplit(t) && S.haveLocal[t.key]).length;
+  return `<div class="pl-row"><label>Phone</label>${can ? `<button class="btn primary" id="auSplit">Split big parts</button>` : ""}<span class="note">${big.length} part${big.length > 1 ? "s are" : " is"} over 50 MB, too big to copy to your account or phone. ${can ? `Splitting cuts ${big.length > 1 ? "them" : "it"} into smaller parts without changing the sound. Your place and line-ups are kept.` : "Open this book on your PC (or the device that has the files) to split them, or send them over Wi-Fi from the PC."}</span></div>`;
 }
 function updateDock(){
   const el = $("#dock"); if (!el) return;
