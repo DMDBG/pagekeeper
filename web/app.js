@@ -320,7 +320,8 @@ setInterval(() => { if (document.visibilityState === "visible") syncNow(); }, 20
    New versions are published as releases on GitHub. The Windows app downloads the new installer from
    there and installs it when you say so. An iPhone can't update a sideloaded app by itself, so it says
    when there's a new version and links to it; AltStore or SideStore can also update it from the source. */
-const REPO = "tatekemper56-lab/pagekeeper";
+const REPO = "DMDBG/pagekeeper";   // where releases are published (the repository moved here from tatekemper56-lab)
+const REPO_OLD = "tatekemper56-lab/pagekeeper";
 const ALTSTORE_SRC = `https://github.com/${REPO}/releases/latest/download/altstore.json`;
 const UPD = { latest: "", page: "", exe: "", busy: false };
 function newer(a, b){ const x = String(a).split(".").map(n => +n || 0), y = String(b).split(".").map(n => +n || 0); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; }
@@ -347,7 +348,7 @@ async function checkUpdate(manual){
 async function installUpdate(){
   if (!TAURI || UPD.busy || !UPD.exe) return;
   // only ever from this app's own releases
-  if (!UPD.exe.startsWith(`https://github.com/${REPO}/releases/download/`)) { toast("That update link doesn't look right, so it wasn't used."); return; }
+  if (![REPO, REPO_OLD].some(r => UPD.exe.startsWith(`https://github.com/${r}/releases/download/`))) { toast("That update link doesn't look right, so it wasn't used."); return; }
   UPD.busy = true; if (S.view === "settings") render();
   try {
     readFlush(); saveAudioPos(true); await idb.put("__library", S.books);
