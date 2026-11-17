@@ -1,5 +1,8 @@
 name: Build Windows app
 
+permissions:
+  contents: write   # to publish each version as a GitHub release
+
 on:
   push:
     branches: [main]
@@ -64,3 +67,21 @@ jobs:
           name: Pagekeeper-Windows
           path: Pagekeeper-Setup.exe
           retention-days: 30
+
+      - name: Publish to this version's GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="1.0.$(git rev-list --count HEAD)"
+          notes="Pagekeeper $v
+
+          - **Windows:** download Pagekeeper-Setup.exe and run it. After this, Pagekeeper updates itself (Settings → About → Check for updates).
+          - **iPhone:** download Pagekeeper.ipa and sideload it. To get updates automatically, use AltStore or SideStore and add this source: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/altstore.json"
+          # The Windows and iPhone builds run side by side; whichever finishes first makes the release.
+          gh release view "v$v" > /dev/null 2>&1 || gh release create "v$v" --title "Pagekeeper $v" --notes "$notes" --target "$GITHUB_SHA" || true
+          for i in 1 2 3 4 5 6; do
+            gh release upload "v$v" Pagekeeper-Setup.exe --clobber && break
+            sleep 15
+          done
+

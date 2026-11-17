@@ -1,5 +1,8 @@
 name: Build iPhone app (IPA)
 
+permissions:
+  contents: write   # to publish each version as a GitHub release
+
 on:
   push:
     branches: [main]
@@ -36,6 +39,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="1.0.$(git rev-list --count HEAD)" CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)" \
             build | tail -n 40
 
       - name: Package Pagekeeper.ipa
@@ -52,3 +56,58 @@ jobs:
           name: Pagekeeper-ipa
           path: ios/Pagekeeper.ipa
           retention-days: 30
+
+      - name: Make the AltStore / SideStore source
+        run: |
+          v="1.0.$(git rev-list --count HEAD)"
+          size=$(stat -f%z ios/Pagekeeper.ipa)
+          base="https://github.com/${GITHUB_REPOSITORY}/releases"
+          cp ios/Pagekeeper/Assets.xcassets/AppIcon.appiconset/icon-1024.png icon.png
+          cat > altstore.json <<EOF
+          {
+            "name": "Pagekeeper",
+            "identifier": "app.pagekeeper.source",
+            "sourceURL": "$base/latest/download/altstore.json",
+            "apps": [{
+              "name": "Pagekeeper",
+              "bundleIdentifier": "app.pagekeeper.reader",
+              "developerName": "Pagekeeper",
+              "subtitle": "Your books and audiobooks, in sync",
+              "localizedDescription": "A clean reading app that keeps your place between iPhone and PC, with an audiobook player that follows along in the text.",
+              "iconURL": "$base/latest/download/icon.png",
+              "tintColor": "#5B7CFA",
+              "version": "$v",
+              "versionDate": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "downloadURL": "$base/download/v$v/Pagekeeper.ipa",
+              "size": $size,
+              "versions": [{
+                "version": "$v",
+                "buildVersion": "$(git rev-list --count HEAD)",
+                "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                "downloadURL": "$base/download/v$v/Pagekeeper.ipa",
+                "size": $size,
+                "minOSVersion": "16.0"
+              }]
+            }],
+            "news": []
+          }
+          EOF
+          python3 -m json.tool altstore.json > /dev/null && echo "source ok"
+
+      - name: Publish to this version's GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="1.0.$(git rev-list --count HEAD)"
+          notes="Pagekeeper $v
+
+          - **Windows:** download Pagekeeper-Setup.exe and run it. After this, Pagekeeper updates itself (Settings → About → Check for updates).
+          - **iPhone:** download Pagekeeper.ipa and sideload it. To get updates automatically, use AltStore or SideStore and add this source: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/altstore.json"
+          # The Windows and iPhone builds run side by side; whichever finishes first makes the release.
+          gh release view "v$v" > /dev/null 2>&1 || gh release create "v$v" --title "Pagekeeper $v" --notes "$notes" --target "$GITHUB_SHA" || true
+          for i in 1 2 3 4 5 6; do
+            gh release upload "v$v" ios/Pagekeeper.ipa altstore.json icon.png --clobber && break
+            sleep 15
+          done
+

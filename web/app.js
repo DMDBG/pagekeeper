@@ -9,7 +9,10 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "exact-11", items: [
+const WHATS_NEW = { id: "time-12", items: [
+  "<b>Reading time:</b> each book shows how long you have spent with it (reading, listening, or both), on the shelf and in its … menu. Time on your phone and PC adds up.",
+  "<b>Updates:</b> new versions come from GitHub. The Windows app updates itself (Settings → About). On iPhone, Pagekeeper tells you when there is a new version, and AltStore or SideStore can install it for you.",
+  "<b>The welcome guide can be removed</b> from its … menu, and brought back from Settings.",
   "<b>Follow-along locks on within a minute</b> on the PC, starting right where you are, even when the book has an intro the audiobook skips. Then every sentence start is double-checked by listening, so the highlight changes right as each sentence is read.",
   "<b>Exact follow-along on the PC:</b> open a book with its audiobook and Pagekeeper listens to the whole thing once (about 20 minutes for a long book), then lights up each sentence right as it's read. No Line up needed, and it syncs to your iPhone.",
   "<b>M4B audiobooks split too:</b> big M4B and M4A files are now cut into smaller parts without changing the sound, so they can go to your iPhone. Sending over Wi-Fi does this for you.",
@@ -200,6 +203,9 @@ function merge(l, r){
   for (const k of PROGRESS) if (prog[k] !== undefined) out[k] = prog[k];
   out.audio = { tracks: trk.tracks || [], url: trk.url || "", tracksAt: trk.tracksAt || 0, track: pos.track || 0, time: pos.time || 0, updatedAt: pos.updatedAt || 0 };
   out.deleted = !!(l.deleted || r.deleted);
+  // reading time: each device's own count, so keep the larger of each
+  const rd = { ...(l.read || {}) }; for (const [k, v] of Object.entries(r.read || {})) rd[k] = Math.max(rd[k] || 0, +v || 0);
+  if (Object.keys(rd).length) out.read = rd;
   return out;
 }
 let persistTimer;
@@ -310,9 +316,82 @@ document.addEventListener("visibilitychange", () => {
 });
 setInterval(() => { if (document.visibilityState === "visible") syncNow(); }, 20000);
 
+/* ---------- updates ----------
+   New versions are published as releases on GitHub. The Windows app downloads the new installer from
+   there and installs it when you say so. An iPhone can't update a sideloaded app by itself, so it says
+   when there's a new version and links to it; AltStore or SideStore can also update it from the source. */
+const REPO = "tatekemper56-lab/pagekeeper";
+const ALTSTORE_SRC = `https://github.com/${REPO}/releases/latest/download/altstore.json`;
+const UPD = { latest: "", page: "", exe: "", busy: false };
+function newer(a, b){ const x = String(a).split(".").map(n => +n || 0), y = String(b).split(".").map(n => +n || 0); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; }
+function updateNote(){
+  if (IOS) return `<p class="note">${UPD.latest ? `<b>Pagekeeper ${esc(UPD.latest)} is out.</b> ` : ""}To get updates automatically, sideload with AltStore or SideStore and add this source: <code style="word-break:break-all">${esc(ALTSTORE_SRC)}</code></p>
+      <div class="row-btns">${UPD.latest ? `<button class="btn primary" id="updGet">Get ${esc(UPD.latest)}</button>` : ""}<button class="btn" id="updSrc">Copy the source link</button></div>`;
+  if (TAURI && UPD.latest) return `<p class="note"><b>Pagekeeper ${esc(UPD.latest)} is ready.</b> Installing takes a few seconds; Pagekeeper reopens by itself.</p><div class="row-btns"><button class="btn primary" id="updNow" ${UPD.busy ? "disabled" : ""}>${UPD.busy ? "Updating…" : "Update now"}</button></div>`;
+  return "";
+}
+async function checkUpdate(manual){
+  if (!(TAURI || IOS) || !Native.ok) return;
+  try {
+    const r = await Native.text(`https://api.github.com/repos/${REPO}/releases/latest`);
+    const j = JSON.parse(r.text), v = String(j.tag_name || "").replace(/^v/, "");
+    const asset = n => ((j.assets || []).find(a => a.name === n) || {}).browser_download_url || "";
+    if (v && newer(v, BUILD.version) && (TAURI ? asset("Pagekeeper-Setup.exe") : asset("Pagekeeper.ipa"))) {
+      const first = UPD.latest !== v;
+      Object.assign(UPD, { latest: v, page: j.html_url || `https://github.com/${REPO}/releases/latest`, exe: asset("Pagekeeper-Setup.exe") });
+      if (first || manual) toast(`Pagekeeper ${esc(v)} is out.`, TAURI ? { label: "Update now", fn: installUpdate } : { label: "Get it", fn: () => Native.open(UPD.page) }, 12000);
+    } else if (manual) toast(`You have the newest version (${esc(BUILD.version)}).`);
+    if (S.view === "settings") render();
+  } catch (e) { if (manual) toast("Couldn't check for updates: " + esc(friendlyNetError(e))); }
+}
+async function installUpdate(){
+  if (!TAURI || UPD.busy || !UPD.exe) return;
+  // only ever from this app's own releases
+  if (!UPD.exe.startsWith(`https://github.com/${REPO}/releases/download/`)) { toast("That update link doesn't look right, so it wasn't used."); return; }
+  UPD.busy = true; if (S.view === "settings") render();
+  try {
+    readFlush(); saveAudioPos(true); await idb.put("__library", S.books);
+    progressToast("Downloading the update…");
+    const f = await Native.file(UPD.exe, p => progressToast(`Downloading the update… ${Math.round(p * 100)}%`));
+    progressToast("Installing… Pagekeeper reopens in a few seconds.");
+    await tauriInvoke("pk_install_update", new Uint8Array(await f.arrayBuffer()));
+  } catch (e) { clearToasts(); toast("The update didn't install: " + esc(String((e && e.message) || e)), null, 9000); UPD.busy = false; if (S.view === "settings") render(); }
+}
+
+/* ---------- reading time ----------
+   Counts time while a book is open on screen and you're using it (a tap, scroll or key in the last two
+   minutes), or while its audiobook or read-aloud is playing. Each device keeps its own count and they
+   add up, so time on your phone and PC both show. Today's time is kept per device too. */
+if (!prefs.get("devId")) prefs.set("devId", Math.random().toString(36).slice(2, 10));
+const RT = { last: Date.now(), act: Date.now(), pend: {}, flushed: Date.now() };
+["pointerdown", "keydown", "wheel", "touchstart"].forEach(ev => document.addEventListener(ev, () => { RT.act = Date.now(); }, { passive: true, capture: true }));
+const dayKey = () => { const d = new Date(); return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate(); };
+const readTotal = b => Object.values((b && b.read) || {}).reduce((a, v) => a + (+v || 0), 0) + (RT.pend[Object.keys(S.books).find(k => S.books[k] === b)] || 0);
+const readToday = b => { const id = Object.keys(S.books).find(k => S.books[k] === b); const t = (b && b.readDay) || {}; return (t.day === dayKey() ? +t.ms || 0 : 0) + (RT.pend[id] || 0); };
+function fmtDur(ms){ const m = Math.round(ms / 60000); if (m < 1) return "under a minute"; if (m < 60) return m + " min"; return Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " min" : ""); }
+function readFlush(){
+  const me = prefs.get("devId"), today = dayKey();
+  for (const [id, ms] of Object.entries(RT.pend)) {
+    const b = S.books[id]; if (!b || ms < 1000) continue;
+    const d = b.readDay && b.readDay.day === today ? +b.readDay.ms || 0 : 0;
+    save(id, { read: { ...(b.read || {}), [me]: ((b.read && b.read[me]) || 0) + Math.round(ms) }, readDay: { day: today, ms: d + Math.round(ms) } });
+  }
+  RT.pend = {}; RT.flushed = Date.now();
+}
+setInterval(() => {
+  const now = Date.now(), dt = Math.min(now - RT.last, 20000); RT.last = now;
+  const audioId = auBook && !au.paused ? auBook.id : null;
+  const ttsId = S.reading && !TTS.paused ? S.cur : null;
+  const looking = document.visibilityState === "visible" && S.view === "reader" && S.cur && now - RT.act < 120000 ? S.cur : null;
+  const id = audioId || ttsId || looking;
+  if (id && S.books[id]) RT.pend[id] = (RT.pend[id] || 0) + dt;
+  if (now - RT.flushed > 60000) readFlush();
+}, 5000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "visible") readFlush(); });
 function ensureGuide(){
+  // Made once. If you remove it, it stays removed (on every device); Settings can bring it back.
   if (!S.books.guide) S.books.guide = { kind:"book", builtin:true, title:GUIDE.title, author:GUIDE.author, format:"text", page:1, pages:0, addedAt:0 };
-  Object.assign(S.books.guide, { builtin:true, title:GUIDE.title, author:GUIDE.author, format:"text", deleted:false });
+  Object.assign(S.books.guide, { builtin:true, title:GUIDE.title, author:GUIDE.author, format:"text" });
 }
 function noticeRemote(before, now){
   if (now.device && now.device !== prefs.get("device") && now.page && now.page !== S.page && (now.updatedAt || 0) > (before.updatedAt || 0)) {
@@ -598,7 +677,7 @@ function renderLibraryBody(){
     const [id, b] = recent;
     const where = b.device && b.updatedAt ? ` · ${esc(b.device)}, ${ago(b.updatedAt)}` : "";
     html += `<div class="continue">${coverHTML(b)}<div class="c-body"><span class="eyebrow">Continue reading</span><h2>${esc(b.title)}</h2>
-      <div class="meta">Page ${b.page || 1}${b.pages ? ` of ${b.pages}` : ""}${where}</div><div class="bar"><i style="width:${pct(b)}%"></i></div></div>
+      <div class="meta">Page ${b.page || 1}${b.pages ? ` of ${b.pages}` : ""}${where}${readTotal(b) >= 60000 ? ` · read for ${fmtDur(readTotal(b))}${readToday(b) >= 60000 ? ` (${fmtDur(readToday(b))} today)` : ""}` : ""}</div><div class="bar"><i style="width:${pct(b)}%"></i></div></div>
       <button class="btn primary" data-open="${id}">Resume</button></div>`;
   }
   html += `<div class="grid">`;
@@ -606,9 +685,9 @@ function renderLibraryBody(){
     html += `<div class="book">
       <button class="open" data-open="${id}" aria-label="Open ${esc(b.title)}">${coverHTML(b)}
         <span class="btitle">${esc(b.title)}</span><span class="bauthor">${esc(b.author || (b.format === "pdf" ? "PDF" : ""))}</span>
-        <span class="bar"><i style="width:${pct(b)}%"></i></span><span class="meta">${b.pages ? `${pct(b)}% · p. ${b.page || 1} / ${b.pages}` : "Not started"}${b.audio?.tracks?.length ? " · audio" : ""}</span>
+        <span class="bar"><i style="width:${pct(b)}%"></i></span><span class="meta">${b.pages ? `${pct(b)}% · p. ${b.page || 1} / ${b.pages}` : "Not started"}${b.audio?.tracks?.length ? " · audio" : ""}</span>${readTotal(b) >= 60000 ? `<span class="meta">Read for ${fmtDur(readTotal(b))}</span>` : ""}
       </button>
-      ${b.builtin ? "" : `<button class="more" data-more="${id}" aria-label="Options for ${esc(b.title)}">${ICON.dots}</button>`}
+      <button class="more" data-more="${id}" aria-label="Options for ${esc(b.title)}">${ICON.dots}</button>
     </div>`;
   }
   html += `<button class="add-tile" id="addTile">${ICON.plus}<span>Add an EPUB, PDF or TXT</span></button></div>`;
@@ -620,12 +699,13 @@ function renderLibraryBody(){
 function bookMenu(id){
   const bk = S.books[id];
   const m = document.createElement("div"); m.className = "modal-back";
-  const where = bk.asset ? "Saved in your account, so every device gets it." : (bk.src && bk.src.size > MAX_FILE) ? `On this device only (${esc(fmtSize(bk.src.size))}). Other devices download the same file.` : Cloud.signedIn() ? "Copying to your account when online." : "On this device.";
+  const where = bk.builtin ? "The built-in guide. You can bring it back later from Settings." : bk.asset ? "Saved in your account, so every device gets it." : (bk.src && bk.src.size > MAX_FILE) ? `On this device only (${esc(fmtSize(bk.src.size))}). Other devices download the same file.` : Cloud.signedIn() ? "Copying to your account when online." : "On this device.";
   m.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>${esc(bk.title)}</h3>
     <p>${bk.src ? esc(bk.src.name) + " · " : ""}${where}</p>
+    ${readTotal(bk) >= 60000 ? `<p>You've spent <b>${fmtDur(readTotal(bk))}</b> with this book${readToday(bk) >= 60000 ? `, ${fmtDur(readToday(bk))} of it today` : ""}.</p>` : ""}
     ${bk.src?.url ? `<p style="word-break:break-all">Download link: ${esc(bk.src.url)}</p>` : ""}
     <div class="row" style="justify-content:flex-start">
-      ${bk.asset ? "" : `<button class="btn" data-link>${bk.src?.url ? "Change download link" : "Add download link"}</button>`}
+      ${bk.asset || bk.builtin ? "" : `<button class="btn" data-link>${bk.src?.url ? "Change download link" : "Add download link"}</button>`}
       <button class="btn danger" data-del>Remove book</button><button class="btn" data-x>Close</button></div></div>`;
   m.addEventListener("click", e => {
     if (e.target === m || e.target.closest("[data-x]")) m.remove();
@@ -641,7 +721,7 @@ function askBookLink(id){
 }
 function removeBook(id){
   const bk = S.books[id];
-  confirmBox("Remove this book?", `“${esc(bk.title)}”, its saved place and any audio will be removed from every device. This can't be undone.`, "Remove", async () => {
+  confirmBox(bk.builtin ? "Remove the welcome guide?" : "Remove this book?", bk.builtin ? "It's removed from every device. You can bring it back any time from Settings." : `“${esc(bk.title)}”, its saved place and any audio will be removed from every device. This can't be undone.`, "Remove", async () => {
     const paths = [bk.asset, ...(bk.audio?.tracks || []).map(t => t.asset)].filter(Boolean);
     await idb.del(id + ":book"); (bk.audio?.tracks || []).forEach(t => idb.del(t.key));
     S.uploads = S.uploads.filter(u => u.id !== id);
@@ -721,9 +801,20 @@ function renderSettings(el){
     <div class="panel">
       <h3>About</h3>
       <p class="note" style="margin:0">Pagekeeper ${esc(BUILD.version)}${BUILD.sha ? ` · build ${esc(BUILD.sha)}` : ""}${BUILD.date ? ` · ${esc(BUILD.date)}` : ""} · ${TAURI ? "Windows app" : IOS ? "iPhone app" : "web version"}</p>
-      <div class="row-btns"><button class="btn" id="showNew">What's new</button></div>
+      <div class="row-btns"><button class="btn" id="showNew">What's new</button>${(TAURI || IOS) ? `<button class="btn" id="checkUpd">Check for updates</button>` : ""}${Object.values(S.books).some(b => b.builtin && !b.deleted) ? "" : `<button class="btn" id="guideBack">Show the welcome guide again</button>`}</div>
+      ${updateNote()}
     </div>`;
   el.querySelectorAll("[data-theme-pick]").forEach(b => b.onclick = () => { prefs.set("theme", b.dataset.themePick); applyTheme(); renderSettings(el); });
+  const gb = $("#guideBack"); if (gb) gb.onclick = () => {
+    // a fresh copy (a removed book stays removed everywhere, so this one gets a new name)
+    const id = "guide-" + Date.now().toString(36);
+    S.books[id] = { kind: "book", builtin: true, title: GUIDE.title, author: GUIDE.author, format: "text", page: 1, pages: 0, addedAt: Date.now() };
+    save(id, { title: GUIDE.title }, { now: true }); toast("The welcome guide is back on your shelf."); renderSettings(el);
+  };
+  const cu = $("#checkUpd"); if (cu) cu.onclick = () => checkUpdate(true);
+  const ui = $("#updNow"); if (ui) ui.onclick = () => installUpdate();
+  const ug = $("#updGet"); if (ug) ug.onclick = () => Native.open(UPD.page);
+  const us = $("#updSrc"); if (us) us.onclick = async () => { try { await navigator.clipboard.writeText(ALTSTORE_SRC); toast("Copied. In AltStore or SideStore, go to Sources, tap +, and paste it."); } catch { toast(ALTSTORE_SRC); } };
   $("#keySet").onclick = () => {
     S.keyRecording = !S.keyRecording; renderSettings(el);
     if (!S.keyRecording) { document.removeEventListener("keydown", S.keyGrab, true); return; }
@@ -2957,6 +3048,7 @@ async function boot(){
   render();
   syncNow();
   if (prefs.get("capOn") && TAURI) setCaption(true);
+  if (TAURI || IOS) { setTimeout(() => checkUpdate(false), 8000); setInterval(() => checkUpdate(false), 6 * 3600 * 1000); }   // look for a new version now and then
   if (TAURI && prefs.get("wifiOn")) tauriInvoke("pk_share_start").then(i => { WIFI.info = i; if (S.dock) updateDock(); }).catch(() => {});   // keep sharing what you shared before   // the Windows pop-out comes back where you left it on
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 }
