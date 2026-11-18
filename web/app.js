@@ -3143,7 +3143,7 @@ function closeSelBar(){ const x = $("#selbar"); if (x) x.remove(); }
 function showSelBar(){
   closeSelBar();
   const info = selInfo(); if (!info) return;
-  const one = /^[\p{L}’'-]+$/u.test(info.text) && info.text.length < 40;
+  const one = /^[\p{L}’'-]+(?: [\p{L}’'-]+){0,2}$/u.test(info.text) && info.text.length < 40;
   const bar = document.createElement("div"); bar.id = "selbar"; bar.setAttribute("role", "toolbar");
   bar.innerHTML = `${Object.keys(HL_COLORS).map(k => `<button class="sw sw-${k}" data-hl="${k}" aria-label="Highlight ${HL_COLORS[k].toLowerCase()}"></button>`).join("")}
     <button data-act="note">Note</button>${one ? `<button data-act="define">Define</button>` : ""}<button data-act="copy">Copy</button><button data-act="find">Search</button>`;
@@ -3259,7 +3259,30 @@ async function defineWord(word){
     $("#defBody", box).innerHTML = `${ph ? `<p class="note">${esc(ph)}</p>` : ""}${means.map(m => `<p><i>${esc(m.partOfSpeech || "")}</i> ${esc(((m.definitions || [])[0] || {}).definition || "")}</p>`).join("")}`;
     $("[data-save]", box).disabled = false;
   } catch {
-    $("#defBody", box).innerHTML = `<p>No definition found${navigator.onLine === false ? " (you're offline)" : ""}. It may be a name or a word made up for this book.</p>`;
+    $("#defBody", box).innerHTML = `<p class="note">Not in the dictionary${navigator.onLine === false ? " (you're offline)" : ""}, so here's what this book says.</p>`;
+  }
+  // The book itself: its own glossary entry if it has one, then where the word has come up so far.
+  const c = S.content[S.cur];
+  if (c && c.kind === "text") {
+    const inBook = document.createElement("div"); inBook.className = "inbook"; $("#defBody", box).after(inBook);
+    const g = glossaryEntry(c, word), hits = mentionsSoFar(c, word);
+    if (!first && g) first = g.slice(0, 300);
+    inBook.innerHTML = `${g ? `<h4>In the book's glossary</h4><p>${esc(g.slice(0, 700))}</p>` : ""}
+      <h4>In this book so far</h4>${hits.length ? `<ul class="toc">${hits.map((h, i) => `<li><button data-hit="${i}"><span class="snip">${esc(h.snip)}</span><span>${h.page}</span></button></li>`).join("")}</ul>` : `<p class="note">It hasn't come up yet before this point.</p>`}
+      ${hits.length && aiReady(aiPick()) ? `<div class="row-btns"><button class="btn" data-explain>Explain from the book (${esc(AI[aiPick()].name)})</button></div><div class="explain"></div>` : ""}`;
+    inBook.querySelectorAll("[data-hit]").forEach(x => x.onclick = () => { const h = hits[+x.dataset.hit]; box.remove(); jumpTo(h.s, h.e - h.s); });
+    const ex = inBook.querySelector("[data-explain]"); if (ex) ex.onclick = async () => {
+      ex.disabled = true; ex.textContent = "Asking…"; const out = inBook.querySelector(".explain");
+      try {
+        const passages = hits.map(h => h.wide).join("\n---\n");
+        const ans = await aiAsk(aiPick(), { maxTokens: 400, effort: "low",
+          system: "Explain what a word or term means in this book, using only the passages given (they come from the part the reader has already read). Answer in one to three plain sentences. If the passages don't make it clear, say what they suggest. Never add anything from later in the book or from outside knowledge of the plot.",
+          user: `Book: ${S.books[S.cur].title}\nTerm: ${word}\n\nPassages:\n${passages}` });
+        out.innerHTML = `<p>${esc(ans)}</p>`; if (!first) first = ans.slice(0, 300); $("[data-save]", box).disabled = false;
+      } catch (e) { out.innerHTML = `<p class="note">${esc(String(e.message || e))}</p>`; }
+      ex.hidden = true;
+    };
+    if (g || hits.length) $("[data-save]", box).disabled = false;
   }
   $("[data-save]", box).onclick = () => {
     const b = S.books[S.cur]; const vocab = { ...(b.vocab || {}) };
@@ -3268,6 +3291,26 @@ async function defineWord(word){
   };
 }
 
+// A book's own glossary entry for a term: a paragraph that starts with it ("FREMEN: the free tribes…").
+function glossaryEntry(c, word){
+  const w = word.trim(); if (w.length < 3) return "";
+  // the term itself, then maybe a pronunciation in brackets, then a colon or dash: "FREMEN: the free tribes…"
+  const re = new RegExp("^" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+") + "\\s*(\\([^)]{0,40}\\))?\\s*[:—–]\\s*\\S", "i");
+  let best = "";
+  for (const blocks of c.pages) for (const [t, x] of blocks) {
+    if (t === "h" || x.length > 1500 || !re.test(x)) continue;
+    if (x.slice(0, w.length) === w.toUpperCase()) return x.trim();   // a glossary written in capitals: the best match
+    if (!best) best = x.trim();
+  }
+  return best;
+}
+// Where a word comes up, only up to the end of the page you're on: the first time and the latest few.
+function mentionsSoFar(c, word){
+  const all = searchBook(c, word).filter(h => h.page <= S.page);
+  const pick = all.length > 7 ? [all[0], ...all.slice(-6)] : all;
+  const pt = pageTexts(c), st = textIndex(c).starts;
+  return pick.map(h => { const i = h.s - st[h.page - 1], t = pt[h.page - 1]; return { ...h, wide: t.slice(Math.max(0, i - 400), i + 400) }; });
+}
 /* ---------- people & places: names that have come up so far (never further than you've read) ---------- */
 const NAME_STOP = new Set(("I A An The He She It They We You Your My Our His Her Its Their This That These Those There Here Then When Where What Who Why How " +
   "But And Or Nor For So Yet If Not No Yes Oh Ah Well Now Still Even Just Only All Some Any Each Every One Two Three Mr Mrs Ms Dr Sir Lady Lord " +
@@ -3400,7 +3443,7 @@ const AI = {
                 def: "claude-opus-5-5", chunk: 60000, together: 3,
                 note: "Pay as you go, billed to your Anthropic account. Anthropic doesn't train on API data by default." },
   gemini:     { name: "Google Gemini", free: true, keyUrl: "https://aistudio.google.com/apikey", keyHint: "AIza…",
-                base: "https://generativelanguage.googleapis.com/v1beta/openai", def: "gemini-flash-latest", chunk: 400000, together: 1,
+                base: "https://generativelanguage.googleapis.com/v1beta/openai", def: "gemini-flash-latest", chunk: 120000, together: 1,
                 note: "Free with daily limits (the Flash models). Google may use free-tier requests to improve its products." },
   groq:       { name: "Groq", free: true, keyUrl: "https://console.groq.com/keys", keyHint: "gsk_…",
                 base: "https://api.groq.com/openai/v1", def: "llama-3.3-70b-versatile", chunk: 14000, together: 1,
@@ -3450,7 +3493,9 @@ async function aiAsk(p, { system, user, maxTokens, effort, onWait }){
   const url = local ? `${A.base}/api/chat` : `${A.base}/chat/completions`;
   const payload = local
     ? { model, stream: false, messages: [{ role: "system", content: system }, { role: "user", content: user }], options: { num_ctx: 16384 } }
-    : { model, max_tokens: maxTokens, messages: [{ role: "system", content: system }, { role: "user", content: user }] };
+    : { model, max_tokens: maxTokens, messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        // Gemini's Flash models think before answering; for summaries a little thinking is plenty, and much quicker
+        ...(p === "gemini" ? { reasoning_effort: effort === "low" ? "low" : "medium" } : {}) };
   const headers = [["Content-Type", "application/json"], ...(key ? [["Authorization", "Bearer " + key]] : [])];
   for (let attempt = 0; ; attempt++) {
     const r = await aiHttp("POST", url, headers, JSON.stringify(payload));
@@ -3462,6 +3507,7 @@ async function aiAsk(p, { system, user, maxTokens, effort, onWait }){
       if (attempt >= 5) throw new Error(`${A.name} says you've reached its free limit for now. Try again later (daily limits reset overnight).${said ? ` (${said})` : ""}`);
       const wait = 20000 * (attempt + 1); onWait && onWait(Math.round(wait / 1000)); await aiWait(wait); continue;
     }
+    if (r.status === 400 && payload.reasoning_effort && /reasoning/i.test(said)) { delete payload.reasoning_effort; continue; }   // a model that doesn't think: ask again without it
     if (r.status === 402) throw new Error(p === "gemini"
       ? `Google says payment is needed (402). This usually means the Google project your key belongs to has billing turned on with no credit, so Google charges every request instead of using the free tier. Fix: in AI Studio (aistudio.google.com/apikey), choose Create API key → in a new project (one without billing), paste that key here, and use a Flash model.${said ? ` Google said: ${said}` : ""}`
       : `${A.name} says payment is needed (402): this model or your account isn't free.${said ? ` It said: ${said}` : ""}`);
@@ -3576,23 +3622,35 @@ function bindAiSettings(el){
     te.disabled = false; te.textContent = "Test it";
   };
 }
+const fmtTimer = ms => { const t = Math.floor(ms / 1000); return Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0"); };
+setInterval(() => { if (RECAP.busy && RECAP.stepAt) paintRecap(); }, 1000);   // keep the timer moving
+function stopRecap(){
+  if (!RECAP.busy) return;
+  RECAP.run = null; RECAP.busy = false; RECAP.step = ""; RECAP.stepAt = 0;
+  RECAP.status = "Stopped. What was already read is kept, so the next recap picks up from there.";
+  paintRecap();
+}
 async function makeRecap(id){
   if (RECAP.busy) return;
-  RECAP.busy = true; RECAP.text = ""; RECAP.status = "Getting ready…"; paintRecap();
+  const run = {}; RECAP.run = run;
+  const live = () => RECAP.run === run;   // false once you tap Stop (an answer still on its way is then ignored)
+  RECAP.busy = true; RECAP.text = ""; RECAP.status = ""; RECAP.step = "Getting ready"; RECAP.stepAt = Date.now(); RECAP.done = 0; RECAP.total = 0; paintRecap();
   try {
     const plan = await recapPlan(id); if (plan.err) throw new Error(plan.err);
     const p = plan.p, A = AI[p];
     if (!aiReady(p)) throw new Error(A.local && !TAURI ? "Ollama works in the Windows app." : `Set up ${A.name} in Settings → AI recaps first.`);
     // 1. summaries of every chapter read so far (kept for next time, whichever AI you use)
     const jobs = []; for (const q of plan.parts) for (const u of q.units) jobs.push({ q, u });
-    let done = 0; const sums = new Map();
-    const work = async () => { for (;;) { const j = jobs.shift(); if (!j) return;
+    let done = 0; const sums = new Map(); RECAP.total = plan.total;
+    const work = async () => { for (;;) { if (!live()) throw new Error("Stopped."); const j = jobs.shift(); if (!j) return;
       const key = sumKey(j.q.id, j.u, j.q.c); let s = await idb.get(key);
       if (s == null) {
-        s = await summarizeUnit(p, j.q.book, j.q.c, j.u, sec => { RECAP.status = `${A.name}'s free limit: waiting ${sec} seconds, then carrying on…`; paintRecap(); });
-        await idb.put(key, s);
+        RECAP.step = `Reading ${j.q.prev ? j.q.book.title + ", " : ""}pages ${j.u.a}–${j.u.b}`; RECAP.stepAt = Date.now(); RECAP.status = ""; paintRecap();
+        s = await summarizeUnit(p, j.q.book, j.q.c, j.u, sec => { if (live()) { RECAP.status = `${A.name}'s free limit: waiting ${sec} seconds, then carrying on…`; paintRecap(); } });
+        if (!live()) throw new Error("Stopped.");
+        await idb.put(key, s);   // kept even if you stop later
       }
-      sums.set(key, s); done++; RECAP.status = `Reading what you've read so far… ${done} of ${plan.total} sections`; paintRecap();
+      sums.set(key, s); done++; RECAP.done = done; paintRecap();
     } };
     await Promise.all(Array.from({ length: A.together }, work));
     // 2. the recap itself
@@ -3608,26 +3666,29 @@ async function makeRecap(id){
     const system = `You write a "previously on" recap for someone returning to a book. Strict rule: the reader must not learn anything that happens after their current position. Use only the material provided; ${missingNote}
 Write it so it's easy to pick the story back up: a short section per earlier book (if any), then "So far in this book", then "Where you left off", which covers the last few pages in a bit more detail. Use ## headings and short paragraphs or bullets. Mention who people are when they come up. About 400 to 900 words.`;
     const user = `Reader's position: ${cur.book.title}, page ${S.page} of ${cur.c.pages.length}.\n${material}`;
-    RECAP.status = `Writing your recap with ${A.name}…`; paintRecap();
+    RECAP.step = `Writing your recap with ${A.name}`; RECAP.stepAt = Date.now(); RECAP.status = ""; paintRecap();
     if (p === "claude") {
       // Claude: streamed, so it appears as it's written
       const client = await claudeClient(), model = aiModel("claude"), haiku = /haiku/.test(model);
       const stream = client.beta.messages.stream({ model, max_tokens: 8000, ...(haiku ? {} : { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" }), output_config: { effort: "medium" }, system, messages: [{ role: "user", content: user }] });
-      for await (const ev of stream) if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") { RECAP.text += ev.delta.text; paintRecap(); }
+      for await (const ev of stream) { if (!live()) { stream.abort && stream.abort(); throw new Error("Stopped."); } if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") { RECAP.step = ""; RECAP.text += ev.delta.text; paintRecap(); } }
       const final = await stream.finalMessage();
       if (final.stop_reason === "refusal") throw new Error("The recap couldn't be written for this book.");
     } else {
-      RECAP.text = await aiAsk(p, { system, user, maxTokens: 4000, effort: "medium", onWait: sec => { RECAP.status = `${A.name}'s free limit: waiting ${sec} seconds…`; paintRecap(); } });
+      const text = await aiAsk(p, { system, user, maxTokens: 4000, effort: "medium", onWait: sec => { if (live()) { RECAP.status = `${A.name}'s free limit: waiting ${sec} seconds…`; paintRecap(); } } });
+      if (!live()) throw new Error("Stopped.");
+      RECAP.text = text;
     }
-    RECAP.page = S.page; RECAP.status = "";
+    RECAP.page = S.page; RECAP.status = ""; RECAP.step = "";
     await idb.put("__recap_" + id, { text: RECAP.text, page: S.page, at: Date.now(), by: A.name });
   } catch (e) {
+    if (!live()) return;   // stopped: the Stop button already said so
     const msg = String((e && e.message) || e);
     // the services' own messages are kept (they say what's wrong); Claude's SDK errors get a plain version
     RECAP.status = aiPick() === "claude" && /401|authentication|x-api-key|invalid api key/i.test(msg) ? "That API key didn't work. Check it in Settings."
       : aiPick() === "claude" && /credit|billing|402/i.test(msg) ? "Your Anthropic account needs credit for this."
       : "Couldn't make the recap: " + msg.slice(0, 700);
-  } finally { RECAP.busy = false; paintRecap(); }
+  } finally { if (live()) { RECAP.busy = false; RECAP.step = ""; RECAP.stepAt = 0; RECAP.run = null; paintRecap(); } }
 }
 function mdLite(s){   // headings, bullets and bold, safely
   return esc(s).split(/\n{2,}/).map(par => {
@@ -3636,7 +3697,13 @@ function mdLite(s){   // headings, bullets and bold, safely
     return `<p>${par.replace(/\n/g, "<br>")}</p>`;
   }).join("").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
 }
-function paintRecap(){ const el = $("#recapOut"); if (el) el.innerHTML = (RECAP.status ? `<p class="note">${esc(RECAP.status)}</p>` : "") + mdLite(RECAP.text); const b = $("#recapGo"); if (b) b.disabled = RECAP.busy; }
+function paintRecap(){
+  const el = $("#recapOut");
+  const step = RECAP.busy && RECAP.step ? `${RECAP.step}… ${fmtTimer(Date.now() - RECAP.stepAt)}${RECAP.total ? ` · ${RECAP.done} of ${RECAP.total} sections done` : ""}` : "";
+  if (el) el.innerHTML = (step ? `<p class="note">${esc(step)}</p>` : "") + (RECAP.status ? `<p class="note">${esc(RECAP.status)}</p>` : "") + mdLite(RECAP.text);
+  const b = $("#recapGo"); if (b) b.disabled = RECAP.busy;
+  const st = $("#recapStop"); if (st) st.hidden = !RECAP.busy;
+}
 
 /* ---------- the book sheet: Contents · Search · Notes · Words · People · Recap ---------- */
 async function renderBookSheet(el){
@@ -3677,6 +3744,7 @@ async function renderBookSheet(el){
       const before = plan.parts ? plan.parts.filter(p => p.prev).map(p => `#${p.book.seriesNo} ${p.book.title}`) : [];
       body = plan.err ? `<p class="note">${esc(plan.err)}</p>` : `<p class="note">Covers ${before.length ? `${esc(before.join(", "))}, and ` : ""}this book up to page ${S.page}.${plan.missing ? ` ${plan.missing} earlier book${plan.missing > 1 ? "s aren't" : " isn't"} in your library, so ${plan.missing > 1 ? "they're" : "it's"} recapped from Claude's general knowledge.` : ""}${b.seriesNo == null ? " For a series, set its collection and number from the book's … menu." : ""}
         <br>Written by ${esc(plan.p === "claude" ? (AI.claude.models.find(m => m[0] === aiModel("claude")) || [0, aiModel("claude")])[1].split(" (")[0] : AI[plan.p].name)}${plan.newChars > 20000 ? (plan.p === "claude" ? `. First time reads ${Math.round(plan.newChars / 1800)} pages (about $${Math.max(0.01, plan.cost).toFixed(2)} on your Anthropic account); later recaps reuse that and cost much less.` : AI[plan.p].local ? `. First time reads ${Math.round(plan.newChars / 1800)} pages on your PC, which can take a while.` : `. Free; first time reads ${Math.round(plan.newChars / 1800)} pages in about ${plan.asks} requests to its free limit.`) : "."}</p>
+        <button class="btn" id="recapStop" ${RECAP.busy ? "" : "hidden"}>Stop</button>
         <button class="btn primary" id="recapGo" ${RECAP.busy ? "disabled" : ""}>${RECAP.text && !RECAP.busy ? `Update recap${RECAP.page && RECAP.page !== S.page ? ` (last: page ${RECAP.page})` : ""}` : "Make recap"}</button>
         <div class="recap" id="recapOut"></div>`;
     }
@@ -3698,6 +3766,7 @@ async function renderBookSheet(el){
   el.querySelectorAll("[data-pos]").forEach(x => x.onclick = () => jumpTo(+x.dataset.pos, +x.dataset.len));
   const tk = $("#toKey"); if (tk) tk.onclick = () => { closeReader(); S.view = "settings"; render(); };
   const rg = $("#recapGo"); if (rg) rg.onclick = () => makeRecap(S.cur);
+  const rs = $("#recapStop"); if (rs) rs.onclick = stopRecap;
   if (tab === "recap") paintRecap();
   el.querySelector("[data-close]").onclick = () => toggleSheet(S.sheet);
 }
