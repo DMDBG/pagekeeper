@@ -56,6 +56,14 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
         try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
     }
 
+    /// AI services can take minutes to answer on a long chapter.
+    private static let aiSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 600
+        cfg.timeoutIntervalForResource = 900
+        return URLSession(configuration: cfg)
+    }()
+
     private static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 60
@@ -92,6 +100,23 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
                 case .failure(let error): replyHandler(nil, error.localizedDescription)
                 }
             }
+
+        case "http":
+            // AI recaps: a request to an AI service (secure addresses only), answered as status + text.
+            guard let s = body["url"] as? String, let url = URL(string: s), url.scheme?.lowercased() == "https" else {
+                replyHandler(nil, "That address isn't allowed."); return
+            }
+            var req = URLRequest(url: url, timeoutInterval: 600)
+            req.httpMethod = (body["method"] as? String) ?? "GET"
+            for pair in (body["headers"] as? [[String]]) ?? [] where pair.count == 2 { req.setValue(pair[1], forHTTPHeaderField: pair[0]) }
+            if let b = body["body"] as? String { req.httpBody = Data(b.utf8) }
+            Self.aiSession.dataTask(with: req) { data, response, error in
+                DispatchQueue.main.async {
+                    if let error { replyHandler(nil, error.localizedDescription); return }
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    replyHandler(["status": status, "text": data.flatMap { String(data: $0, encoding: .utf8) } ?? ""], nil)
+                }
+            }.resume()
 
         case "done":
             if let token = body["token"] as? String, !token.contains("/"), !token.contains("..") {

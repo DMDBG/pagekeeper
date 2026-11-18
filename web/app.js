@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "notes-13", items: [
+const WHATS_NEW = { id: "ai-14", items: [
+  "<b>Choose the AI for recaps</b> in Settings → AI recaps: Claude, or free options (Google Gemini, Groq, OpenRouter, Mistral), or Ollama running on your PC with no key at all.",
   "<b>Highlights, notes and bookmarks:</b> select text to highlight it, add a note or look a word up. The bookmark button marks a page. Everything is under <b>Contents → Notes</b>, syncs to your other devices, and can be copied or saved as a file.",
   "<b>Search, People and Recap</b> are under Contents too. Search plays the audiobook from a result; People lists the names so far, never past your page; Recap (with your Anthropic API key) tells you what's happened in the series up to your page.",
   "<b>Listening:</b> a sleep timer (15, 30 or 60 minutes, or the end of the chapter, with a fade-out), smart rewind after a pause, and a chapter list once the audiobook is synced.",
@@ -810,8 +811,8 @@ function renderSettings(el){
     </div>
     <div class="panel">
       <h3>AI recaps</h3>
-      <p class="note" style="margin:0">In a book, <b>Contents → Recap</b> tells you what's happened so far in the book and the earlier books of its series, never past your page. It uses Claude with your own Anthropic API key (from console.anthropic.com), billed to your account: the first recap of a long book costs about a dollar, later ones a few cents. The key stays on this device; only the text you've read so far is sent, straight to Anthropic.</p>
-      <div class="row-btns"><input id="claudeKey" type="password" autocomplete="off" placeholder="${prefs.get("claudeKey") ? "Key saved · paste a new one to replace it" : "sk-ant-…"}" style="flex:1;min-width:200px"><button class="btn primary" id="claudeSave">Save key</button>${prefs.get("claudeKey") ? `<button class="btn" id="claudeDel">Remove key</button>` : ""}</div>
+      <p class="note" style="margin:0 0 8px">In a book, <b>Contents → Recap</b> tells you what's happened so far, in the book and the earlier books of its series, never past your page. Choose which AI writes it:</p>
+      ${aiSettingsHTML()}
     </div>
     <div class="panel">
       <h3>Listening</h3>
@@ -829,8 +830,7 @@ function renderSettings(el){
       ${updateNote()}
     </div>`;
   el.querySelectorAll("[data-theme-pick]").forEach(b => b.onclick = () => { prefs.set("theme", b.dataset.themePick); applyTheme(); renderSettings(el); });
-  const ks = $("#claudeSave"); if (ks) ks.onclick = () => { const v = $("#claudeKey").value.trim(); if (!/^sk-ant-/.test(v)) { toast("That doesn't look like an Anthropic API key (it starts with sk-ant-)."); return; } prefs.set("claudeKey", v); toast("Key saved on this device."); renderSettings(el); };
-  const kd = $("#claudeDel"); if (kd) kd.onclick = () => { prefs.set("claudeKey", undefined); toast("Key removed."); renderSettings(el); };
+  bindAiSettings(el);
   const sr = $("#smartRw"); if (sr) sr.onchange = () => prefs.set("smartRewind", sr.checked ? undefined : false);
   const gb = $("#guideBack"); if (gb) gb.onclick = () => {
     // a fresh copy (a removed book stays removed everywhere, so this one gets a new name)
@@ -3390,18 +3390,98 @@ function bindExtrasDock(){
 /* ---------- AI recap: what's happened in the series so far, never past where you are ----------
    Each chapter you've read is summarized once (and kept on this device); the recap is then written from
    those summaries plus the text of the chapter you're in, up to the end of your page. Earlier books in the
-   series come from their own chapter summaries if they're in your library. The requests go straight from
-   this device to Anthropic with your API key. */
-const RECAP_MODEL = "claude-opus-5-5";
+   series come from their own chapter summaries if they're in your library.
+   You choose the AI in Settings: Claude (through Anthropic's official SDK), or Google Gemini, Groq,
+   OpenRouter, Mistral (their OpenAI-style chat endpoint), or Ollama running on this PC. Requests go straight
+   from this device to the service you chose, with your key. */
+const AI = {
+  claude:     { name: "Claude (Anthropic)", free: false, keyUrl: "https://console.anthropic.com/settings/keys", keyHint: "sk-ant-…",
+                models: [["claude-opus-5-5", "Claude Opus 5.5 (best)"], ["claude-sonnet-5-5", "Claude Sonnet 5.5 (half the price)"], ["claude-haiku-5-5", "Claude Haiku 5.5 (about 1/40 the price)"]],
+                def: "claude-opus-5-5", chunk: 60000, together: 3,
+                note: "Pay as you go, billed to your Anthropic account. Anthropic doesn't train on API data by default." },
+  gemini:     { name: "Google Gemini", free: true, keyUrl: "https://aistudio.google.com/apikey", keyHint: "AIza…",
+                base: "https://generativelanguage.googleapis.com/v1beta/openai", def: "gemini-flash-latest", chunk: 400000, together: 1,
+                note: "Free with daily limits (the Flash models). Google may use free-tier requests to improve its products." },
+  groq:       { name: "Groq", free: true, keyUrl: "https://console.groq.com/keys", keyHint: "gsk_…",
+                base: "https://api.groq.com/openai/v1", def: "llama-3.3-70b-versatile", chunk: 14000, together: 1,
+                note: "Free with per-minute and daily limits, so a first recap of a long book takes a while." },
+  openrouter: { name: "OpenRouter", free: true, keyUrl: "https://openrouter.ai/settings/keys", keyHint: "sk-or-…",
+                base: "https://openrouter.ai/api/v1", def: "", chunk: 60000, together: 1, freeOnly: true,
+                note: "Free models (their names end in :free) have about 50 requests a day. Pick a model below. Some free models' providers may keep or train on what you send." },
+  mistral:    { name: "Mistral", free: true, keyUrl: "https://console.mistral.ai/api-keys", keyHint: "",
+                base: "https://api.mistral.ai/v1", def: "mistral-small-latest", chunk: 60000, together: 1,
+                note: "Free mode with rate limits. Mistral may use free-mode requests for training unless you opt out in its admin settings." },
+  ollama:     { name: "Ollama (on this PC)", free: true, local: true, keyUrl: "https://ollama.com/download", keyHint: "",
+                base: "http://localhost:11434", def: "", chunk: 24000, together: 1,
+                note: "Free and private: the book never leaves your PC. Needs Ollama running with a model pulled (for example: ollama pull llama3.1). Slower, and Windows only." },
+};
+const aiPick = () => AI[prefs.get("aiProvider")] ? prefs.get("aiProvider") : "claude";
+const aiKey = p => p === "claude" ? prefs.get("claudeKey") : prefs.get("aiKey_" + p);
+const aiModel = p => prefs.get("aiModel_" + p) || AI[p].def;
+const aiReady = p => (AI[p].local || !!aiKey(p)) && !!aiModel(p) && !(AI[p].local && !TAURI);
 let ClaudeSDK = null;
 async function claudeClient(){
-  const key = prefs.get("claudeKey"); if (!key) throw new Error("Add your Anthropic API key in Settings first.");
+  const key = aiKey("claude"); if (!key) throw new Error("Add your Anthropic API key in Settings first.");
   if (!ClaudeSDK) ClaudeSDK = (await import("./vendor/anthropic-sdk.js")).default;
   return new ClaudeSDK({ apiKey: key, dangerouslyAllowBrowser: true });
 }
+// A web request through the app (so services that refuse requests from web pages still work).
+async function aiHttp(method, url, headers, body){
+  if (TAURI) return tauriInvoke("pk_http", { method, url, headers, body: body == null ? null : body }).catch(e => { throw new Error(typeof e === "string" ? e : (e && e.message) || "The request failed."); });
+  if (IOS) return Native.call({ op: "http", method, url, headers, body: body == null ? undefined : body });
+  const r = await fetch(url, { method, headers: Object.fromEntries(headers), body: body == null ? undefined : body });
+  return { status: r.status, text: await r.text() };
+}
+const aiWait = ms => new Promise(r => setTimeout(r, ms));
+// One question to the chosen AI: system + user text in, the answer's text out. Waits and retries on a rate limit.
+async function aiAsk(p, { system, user, maxTokens, effort, onWait }){
+  if (p === "claude") {
+    const client = await claudeClient(), model = aiModel("claude"), haiku = /haiku/.test(model);
+    const res = await client.beta.messages.create({
+      model, max_tokens: maxTokens,
+      ...(haiku ? {} : { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" }),   // a refused request is retried on another model
+      output_config: { effort }, system, messages: [{ role: "user", content: user }],
+    });
+    if (res.stop_reason === "refusal") throw new Error("Claude declined this text.");
+    return res.content.filter(x => x.type === "text").map(x => x.text).join("").trim();
+  }
+  const A = AI[p], key = aiKey(p), model = aiModel(p);
+  const local = A.local;
+  const url = local ? `${A.base}/api/chat` : `${A.base}/chat/completions`;
+  const payload = local
+    ? { model, stream: false, messages: [{ role: "system", content: system }, { role: "user", content: user }], options: { num_ctx: 16384 } }
+    : { model, max_tokens: maxTokens, messages: [{ role: "system", content: system }, { role: "user", content: user }] };
+  const headers = [["Content-Type", "application/json"], ...(key ? [["Authorization", "Bearer " + key]] : [])];
+  for (let attempt = 0; ; attempt++) {
+    const r = await aiHttp("POST", url, headers, JSON.stringify(payload));
+    let j = null; try { j = JSON.parse(r.text); } catch {}
+    if (r.status === 429 || r.status === 503) {
+      if (attempt >= 5) throw new Error(`${A.name} says you've reached its free limit for now. Try again later (daily limits reset overnight).`);
+      const wait = 20000 * (attempt + 1); onWait && onWait(Math.round(wait / 1000)); await aiWait(wait); continue;
+    }
+    if (r.status === 401 || r.status === 403) throw new Error(`${A.name} didn't accept the key. Check it in Settings.`);
+    if (r.status >= 400) throw new Error(`${A.name}: ` + ((j && (j.error && (j.error.message || j.error) || j.message)) || `error ${r.status}`));
+    const text = local ? j && j.message && j.message.content : j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+    if (typeof text !== "string") throw new Error(`${A.name} sent back an answer Pagekeeper couldn't read.`);
+    return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();   // some local models write their reasoning first
+  }
+}
+// The models a service offers (for the dropdown in Settings).
+async function aiModels(p){
+  if (p === "claude") return AI.claude.models.map(m => m[0]);
+  const A = AI[p], key = aiKey(p);
+  const r = await aiHttp("GET", A.local ? `${A.base}/api/tags` : `${A.base}/models`, key ? [["Authorization", "Bearer " + key]] : [], null);
+  if (r.status === 401 || r.status === 403) throw new Error(`${A.name} didn't accept the key.`);
+  if (r.status >= 400) throw new Error(`${A.name} answered ${r.status}.`);
+  const j = JSON.parse(r.text);
+  let ids = A.local ? (j.models || []).map(m => m.name) : (j.data || []).map(m => String(m.id || "").replace(/^models\//, ""));
+  if (A.freeOnly) ids = ids.filter(id => /:free$/.test(id));
+  if (p === "gemini") ids = ids.filter(id => /gemini/.test(id) && !/embedding|image|tts|audio|live/.test(id));
+  return ids.sort();
+}
 const textOfPages = (c, a, b) => c.pages.slice(a - 1, b).map(blocks => blocks.map(([t, x]) => t === "h" ? "\n## " + x + "\n" : x).join("\n\n")).join("\n\n");
-// The book in chapters (long ones split), up to and including page `upto`.
-function recapUnits(c, upto){
+// The book in chapters (long ones split to suit the service), up to and including page `upto`.
+function recapUnits(c, upto, chunk = 60000){
   const toc = c.toc && c.toc.length ? c.toc : [{ title: "Start", page: 1 }], pt = pageTexts(c), units = [];
   toc.forEach((t, i) => {
     if (t.page > upto) return;
@@ -3409,24 +3489,25 @@ function recapUnits(c, upto){
     const whole = chapEnd <= upto;   // a finished chapter is summarized; the one you are in is read as it is
     const end = Math.min(upto, chapEnd);
     for (let a = t.page; a <= end;) {
-      let b = a, len = 0; while (b <= end && len < 60000) { len += (pt[b - 1] || "").length; b++; }
+      let b = a, len = 0; while (b <= end && len < chunk) { len += (pt[b - 1] || "").length; b++; }
       units.push({ title: t.title, a, b: b - 1, whole }); a = b;
     }
   });
+  // A service that takes in a lot at once (Gemini) gets neighbouring finished chapters together: fewer requests.
+  if (chunk > 100000) {
+    const merged = [];
+    for (const u of units) { const l = merged[merged.length - 1];
+      if (l && l.whole && u.whole && textOfPages(c, l.a, u.b).length < chunk) { l.b = u.b; l.title = l.title.split(" – ")[0] + " – " + u.title; } else merged.push({ ...u }); }
+    return merged;
+  }
   return units;
 }
 const sumKey = (bookId, u, c) => `__sum_${bookId}_${u.a}_${u.b}_${(textIndex(c).total)}`;
-async function summarizeUnit(client, book, c, u){
+const SUM_SYS = "You write chapter summaries that a reader will use to remember a book. Cover what happens, who is involved, what changes, and any reveals, in plain prose of 120 to 220 words (longer if the text covers several chapters: about 150 words per chapter). Use only this text; don't add anything from outside it. If the text is front matter (copyright, praise, contents, dedication), reply with exactly: FRONT MATTER";
+async function summarizeUnit(p, book, c, u, onWait){
   const text = textOfPages(c, u.a, u.b);
   if (text.length < 1500) return text.trim();   // short enough to use as it is
-  const res = await client.beta.messages.create({
-    model: RECAP_MODEL, max_tokens: 3000, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default",
-    output_config: { effort: "low" },
-    system: "You write chapter summaries that a reader will use to remember a book. Cover what happens, who is involved, what changes, and any reveals, in plain prose of 120 to 220 words. Use only this text; don't add anything from outside it. If the text is front matter (copyright, praise, contents, dedication), reply with exactly: FRONT MATTER",
-    messages: [{ role: "user", content: `Book: ${book.title}${book.author ? " by " + book.author : ""}\nSection: ${u.title} (pages ${u.a}–${u.b})\n\n<text>\n${text}\n</text>` }],
-  });
-  if (res.stop_reason === "refusal") return "";
-  return res.content.filter(x => x.type === "text").map(x => x.text).join("").trim();
+  return aiAsk(p, { system: SUM_SYS, user: `Book: ${book.title}${book.author ? " by " + book.author : ""}\nSection: ${u.title} (pages ${u.a}–${u.b})\n\n<text>\n${text}\n</text>`, maxTokens: 3000, effort: "low", onWait });
 }
 // Earlier books of the same series in the library (same collection, lower number).
 function seriesBefore(b){
@@ -3434,65 +3515,108 @@ function seriesBefore(b){
   return Object.entries(S.books).filter(([id, x]) => x !== b && !x.deleted && x.kind === "book" && x.seriesNo != null && x.seriesNo < b.seriesNo && shelvesOf(x).some(s => shelvesOf(b).includes(s)))
     .sort((a, z) => a[1].seriesNo - z[1].seriesNo);
 }
+const CLAUDE_PRICE = { "claude-opus-5-5": [4, 20], "claude-sonnet-5-5": [2, 10], "claude-haiku-5-5": [0.1, 0.5] };
 async function recapPlan(id){
-  const b = S.books[id], c = await loadContent(id);
+  const b = S.books[id], c = await loadContent(id), p = aiPick(), chunk = AI[p].chunk;
   if (!c || c.kind !== "text") return { err: "Recaps work with EPUB and text books." };
   const parts = [];
   for (const [pid, pb] of seriesBefore(b)) {
     let pc = null; try { pc = await loadContent(pid); } catch {}
-    if (pc && pc.kind === "text") parts.push({ id: pid, book: pb, c: pc, units: recapUnits(pc, pc.pages.length), prev: true });
+    if (pc && pc.kind === "text") parts.push({ id: pid, book: pb, c: pc, units: recapUnits(pc, pc.pages.length, chunk), prev: true });
   }
-  const units = recapUnits(c, S.page);
+  const units = recapUnits(c, S.page, chunk);
   parts.push({ id, book: b, c, units: units.filter(u => u.whole), live: units.filter(u => !u.whole), prev: false });
-  let newChars = 0, cached = 0, total = 0;
-  for (const p of parts) for (const u of p.units) { total++; if (await idb.get(sumKey(p.id, u, p.c))) cached++; else newChars += Math.max(0, textOfPages(p.c, u.a, u.b).length); }
-  const missing = b.seriesNo != null ? Math.max(0, Math.ceil(b.seriesNo) - 1 - parts.filter(p => p.prev).length) : 0;
-  const cost = newChars / 4 / 1e6 * 4 + (total - cached) * 300 / 1e6 * 20 + 0.05;   // rough, Opus 5.5 prices
-  return { parts, newChars, cached, total, missing, cost };
+  let newChars = 0, cached = 0, total = 0, asks = 0;
+  for (const q of parts) for (const u of q.units) { total++; if (await idb.get(sumKey(q.id, u, q.c))) cached++; else { const n = textOfPages(q.c, u.a, u.b).length; newChars += n; if (n >= 1500) asks++; } }
+  const missing = b.seriesNo != null ? Math.max(0, Math.ceil(b.seriesNo) - 1 - parts.filter(q => q.prev).length) : 0;
+  const price = CLAUDE_PRICE[aiModel("claude")] || [4, 20];
+  const cost = p === "claude" ? newChars / 4 / 1e6 * price[0] + asks * 300 / 1e6 * price[1] + 0.01 + 15000 / 1e6 * price[0] : 0;
+  return { parts, newChars, cached, total, asks: asks + 1, missing, cost, p };
 }
 const RECAP = { busy: false, text: "", page: 0, status: "" };
+const AI_LISTS = {};
+function aiSettingsHTML(){
+  const p = aiPick(), A = AI[p], host = A.keyUrl.replace(/^https?:\/\//, "").split("/")[0], key = aiKey(p), list = AI_LISTS[p], model = aiModel(p);
+  return `<div class="aipick">${Object.entries(AI).map(([k, x]) => `<label class="check"><input type="radio" name="aiProv" value="${k}" ${p === k ? "checked" : ""} ${x.local && !TAURI ? "disabled" : ""}> ${esc(x.name)}${x.free ? ` <span class="tag">free</span>` : ""}${x.local && !TAURI ? ` <span class="note">(Windows app only)</span>` : ""}</label>`).join("")}</div>
+    <p class="note">${esc(A.note)} ${A.local ? `Get it at <a href="${A.keyUrl}" target="_blank" rel="noopener">${host}</a>.` : `Get a key at <a href="${A.keyUrl}" target="_blank" rel="noopener">${host}</a>. The key stays on this device.`}</p>
+    ${A.local ? "" : `<div class="row-btns"><input id="aiKeyIn" type="password" autocomplete="off" placeholder="${key ? "Key saved · paste a new one to replace it" : esc(A.keyHint || "API key")}" style="flex:1;min-width:200px"><button class="btn primary" id="aiKeySave">Save key</button>${key ? `<button class="btn" id="aiKeyDel">Remove</button>` : ""}</div>`}
+    <div class="row-btns"><label style="align-self:center">Model</label>
+      ${p === "claude" ? `<select id="aiModelSel">${AI.claude.models.map(([id, l]) => `<option value="${id}" ${model === id ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`
+        : list ? `<select id="aiModelSel">${list.includes(model) ? "" : `<option value="">Choose a model</option>`}${list.map(id => `<option value="${esc(id)}" ${model === id ? "selected" : ""}>${esc(id)}</option>`).join("")}</select>`
+        : `<input id="aiModelIn" value="${esc(model)}" placeholder="${A.freeOnly ? "load the list and pick a :free model" : "model name"}" style="flex:1;min-width:160px"><button class="btn" id="aiList">Load the list</button>`}
+      <button class="btn" id="aiTest">Test it</button></div>`;
+}
+function bindAiSettings(el){
+  el.querySelectorAll('[name="aiProv"]').forEach(r => r.onchange = () => { prefs.set("aiProvider", r.value); renderSettings(el); });
+  const p = aiPick();
+  const ks = $("#aiKeySave"); if (ks) ks.onclick = () => {
+    const v = $("#aiKeyIn").value.trim(); if (!v) return;
+    if (p === "claude" && !/^sk-ant-/.test(v)) { toast("That doesn't look like an Anthropic API key (it starts with sk-ant-)."); return; }
+    prefs.set(p === "claude" ? "claudeKey" : "aiKey_" + p, v); toast("Key saved on this device."); renderSettings(el);
+  };
+  const kd = $("#aiKeyDel"); if (kd) kd.onclick = () => { prefs.set(p === "claude" ? "claudeKey" : "aiKey_" + p, undefined); toast("Key removed."); renderSettings(el); };
+  const ms = $("#aiModelSel"); if (ms) ms.onchange = () => prefs.set("aiModel_" + p, ms.value || undefined);
+  const mi = $("#aiModelIn"); if (mi) mi.onchange = () => prefs.set("aiModel_" + p, mi.value.trim() || undefined);
+  const li = $("#aiList"); if (li) li.onclick = async () => {
+    li.disabled = true; li.textContent = "Loading…";
+    try { const ids = await aiModels(p); if (!ids.length) throw new Error(AI[p].local ? "No models yet. In a terminal, run: ollama pull llama3.1" : "No models came back."); AI_LISTS[p] = ids; renderSettings(el); }
+    catch (e) { toast(esc(String(e.message || e))); li.disabled = false; li.textContent = "Load the list"; }
+  };
+  const te = $("#aiTest"); if (te) te.onclick = async () => {
+    te.disabled = true; te.textContent = "Testing…";
+    try { const a = await aiAsk(p, { system: "Reply with one short friendly sentence.", user: "Say hello to a reader in under 12 words.", maxTokens: 60, effort: "low" }); toast(`${esc(AI[p].name)} works: “${esc(a.slice(0, 120))}”`, null, 7000); }
+    catch (e) { toast(esc(String(e.message || e)), null, 9000); }
+    te.disabled = false; te.textContent = "Test it";
+  };
+}
 async function makeRecap(id){
   if (RECAP.busy) return;
   RECAP.busy = true; RECAP.text = ""; RECAP.status = "Getting ready…"; paintRecap();
   try {
-    const client = await claudeClient(), plan = await recapPlan(id); if (plan.err) throw new Error(plan.err);
-    // 1. summaries of every chapter read so far (three at a time; kept for next time)
-    const jobs = []; for (const p of plan.parts) for (const u of p.units) jobs.push({ p, u });
+    const plan = await recapPlan(id); if (plan.err) throw new Error(plan.err);
+    const p = plan.p, A = AI[p];
+    if (!aiReady(p)) throw new Error(A.local && !TAURI ? "Ollama works in the Windows app." : `Set up ${A.name} in Settings → AI recaps first.`);
+    // 1. summaries of every chapter read so far (kept for next time, whichever AI you use)
+    const jobs = []; for (const q of plan.parts) for (const u of q.units) jobs.push({ q, u });
     let done = 0; const sums = new Map();
     const work = async () => { for (;;) { const j = jobs.shift(); if (!j) return;
-      const key = sumKey(j.p.id, j.u, j.p.c); let s = await idb.get(key);
-      if (s == null) { s = await summarizeUnit(client, j.p.book, j.p.c, j.u); await idb.put(key, s); }
+      const key = sumKey(j.q.id, j.u, j.q.c); let s = await idb.get(key);
+      if (s == null) {
+        s = await summarizeUnit(p, j.q.book, j.q.c, j.u, sec => { RECAP.status = `${A.name}'s free limit: waiting ${sec} seconds, then carrying on…`; paintRecap(); });
+        await idb.put(key, s);
+      }
       sums.set(key, s); done++; RECAP.status = `Reading what you've read so far… ${done} of ${plan.total} sections`; paintRecap();
     } };
-    await Promise.all([work(), work(), work()]);
-    // 2. the recap itself, written as it streams in
+    await Promise.all(Array.from({ length: A.together }, work));
+    // 2. the recap itself
     const cur = plan.parts[plan.parts.length - 1];
     let material = "";
-    for (const p of plan.parts) {
-      material += `\n\n# ${p.prev ? `Earlier book #${p.book.seriesNo}: ` : "The book being read now: "}${p.book.title}\n`;
-      for (const u of p.units) { const s = sums.get(sumKey(p.id, u, p.c)); if (s && s !== "FRONT MATTER") material += `\n### ${u.title}\n${s}\n`; }
+    for (const q of plan.parts) {
+      material += `\n\n# ${q.prev ? `Earlier book #${q.book.seriesNo}: ` : "The book being read now: "}${q.book.title}\n`;
+      for (const u of q.units) { const s = sums.get(sumKey(q.id, u, q.c)); if (s && s !== "FRONT MATTER") material += `\n### ${u.title}\n${s}\n`; }
     }
-    const liveText = cur.live.map(u => textOfPages(cur.c, u.a, u.b)).join("\n\n").slice(-60000);
+    const liveText = cur.live.map(u => textOfPages(cur.c, u.a, u.b)).join("\n\n").slice(-Math.min(60000, A.chunk));
     material += `\n\n# The chapter the reader is in now, up to the end of their current page\n<text>\n${liveText}\n</text>`;
     const missingNote = plan.missing ? `This is book ${cur.book.seriesNo} of its series, and ${plan.missing} earlier book${plan.missing > 1 ? "s aren't" : " isn't"} in the material. Only if you reliably know this series, add a short recap of ${plan.missing > 1 ? "those books" : "that book"} from general knowledge, clearly labeled as such. Never use outside knowledge about this book or anything after it.` : "Use only the material given.";
-    RECAP.status = "Writing your recap…"; paintRecap();
-    const stream = client.beta.messages.stream({
-      model: RECAP_MODEL, max_tokens: 8000, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default",
-      output_config: { effort: "medium" },
-      system: `You write a "previously on" recap for someone returning to a book. Strict rule: the reader must not learn anything that happens after their current position. Use only the material provided; ${missingNote}
-Write it so it's easy to pick the story back up: a short section per earlier book (if any), then "So far in this book", then "Where you left off", which covers the last few pages in a bit more detail. Use ## headings and short paragraphs or bullets. Mention who people are when they come up. About 400 to 900 words.`,
-      messages: [{ role: "user", content: `Reader's position: ${cur.book.title}, page ${S.page} of ${cur.c.pages.length}.\n${material}` }],
-    });
-    for await (const ev of stream) {
-      if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") { RECAP.text += ev.delta.text; paintRecap(); }
+    const system = `You write a "previously on" recap for someone returning to a book. Strict rule: the reader must not learn anything that happens after their current position. Use only the material provided; ${missingNote}
+Write it so it's easy to pick the story back up: a short section per earlier book (if any), then "So far in this book", then "Where you left off", which covers the last few pages in a bit more detail. Use ## headings and short paragraphs or bullets. Mention who people are when they come up. About 400 to 900 words.`;
+    const user = `Reader's position: ${cur.book.title}, page ${S.page} of ${cur.c.pages.length}.\n${material}`;
+    RECAP.status = `Writing your recap with ${A.name}…`; paintRecap();
+    if (p === "claude") {
+      // Claude: streamed, so it appears as it's written
+      const client = await claudeClient(), model = aiModel("claude"), haiku = /haiku/.test(model);
+      const stream = client.beta.messages.stream({ model, max_tokens: 8000, ...(haiku ? {} : { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" }), output_config: { effort: "medium" }, system, messages: [{ role: "user", content: user }] });
+      for await (const ev of stream) if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") { RECAP.text += ev.delta.text; paintRecap(); }
+      const final = await stream.finalMessage();
+      if (final.stop_reason === "refusal") throw new Error("The recap couldn't be written for this book.");
+    } else {
+      RECAP.text = await aiAsk(p, { system, user, maxTokens: 4000, effort: "medium", onWait: sec => { RECAP.status = `${A.name}'s free limit: waiting ${sec} seconds…`; paintRecap(); } });
     }
-    const final = await stream.finalMessage();
-    if (final.stop_reason === "refusal") throw new Error("The recap couldn't be written for this book.");
     RECAP.page = S.page; RECAP.status = "";
-    await idb.put("__recap_" + id, { text: RECAP.text, page: S.page, at: Date.now() });
+    await idb.put("__recap_" + id, { text: RECAP.text, page: S.page, at: Date.now(), by: A.name });
   } catch (e) {
     const msg = String((e && e.message) || e);
-    RECAP.status = /401|authentication|api.key|x-api-key/i.test(msg) ? "That API key didn't work. Check it in Settings." : /429|rate/i.test(msg) ? "Anthropic is busy (rate limit). Try again in a minute." : /credit|billing|402/i.test(msg) ? "Your Anthropic account needs credit for this." : "Couldn't make the recap: " + msg;
+    RECAP.status = /401|authentication|x-api-key|invalid api key/i.test(msg) ? "That API key didn't work. Check it in Settings." : /credit|billing|402/i.test(msg) ? "Your account with this AI service needs credit." : msg.length < 300 ? "Couldn't make the recap: " + msg : "Couldn't make the recap.";
   } finally { RECAP.busy = false; paintRecap(); }
 }
 function mdLite(s){   // headings, bullets and bold, safely
@@ -3537,12 +3661,12 @@ async function renderBookSheet(el){
   } else if (tab === "recap") {
     const saved = await idb.get("__recap_" + S.cur);
     if (!RECAP.busy && saved && !RECAP.text) { RECAP.text = saved.text; RECAP.page = saved.page; }
-    if (!prefs.get("claudeKey")) body = `<p>A recap of everything that's happened so far, in this book and the earlier books of its series, without anything past your page.</p><p class="note">It uses Claude, with your own Anthropic API key. Add it in <b>Settings → AI recaps</b>.</p><button class="btn primary" id="toKey">Open Settings</button>`;
+    if (!aiReady(aiPick())) body = `<p>A recap of everything that's happened so far, in this book and the earlier books of its series, without anything past your page.</p><p class="note">Choose the AI that writes it (some are free) in <b>Settings → AI recaps</b>${AI[aiPick()].local && !TAURI ? ". Ollama works in the Windows app only; pick another one here." : ", and add its key."}</p><button class="btn primary" id="toKey">Open Settings</button>`;
     else {
       const plan = await recapPlan(S.cur);
       const before = plan.parts ? plan.parts.filter(p => p.prev).map(p => `#${p.book.seriesNo} ${p.book.title}`) : [];
       body = plan.err ? `<p class="note">${esc(plan.err)}</p>` : `<p class="note">Covers ${before.length ? `${esc(before.join(", "))}, and ` : ""}this book up to page ${S.page}.${plan.missing ? ` ${plan.missing} earlier book${plan.missing > 1 ? "s aren't" : " isn't"} in your library, so ${plan.missing > 1 ? "they're" : "it's"} recapped from Claude's general knowledge.` : ""}${b.seriesNo == null ? " For a series, set its collection and number from the book's … menu." : ""}
-        ${plan.newChars > 20000 ? `<br>First time reads ${Math.round(plan.newChars / 1800)} pages (about $${plan.cost.toFixed(2)} on your Anthropic account); later recaps reuse that and cost a few cents.` : ""}</p>
+        <br>Written by ${esc(plan.p === "claude" ? (AI.claude.models.find(m => m[0] === aiModel("claude")) || [0, aiModel("claude")])[1].split(" (")[0] : AI[plan.p].name)}${plan.newChars > 20000 ? (plan.p === "claude" ? `. First time reads ${Math.round(plan.newChars / 1800)} pages (about $${Math.max(0.01, plan.cost).toFixed(2)} on your Anthropic account); later recaps reuse that and cost much less.` : AI[plan.p].local ? `. First time reads ${Math.round(plan.newChars / 1800)} pages on your PC, which can take a while.` : `. Free; first time reads ${Math.round(plan.newChars / 1800)} pages in about ${plan.asks} requests to its free limit.`) : "."}</p>
         <button class="btn primary" id="recapGo" ${RECAP.busy ? "disabled" : ""}>${RECAP.text && !RECAP.busy ? `Update recap${RECAP.page && RECAP.page !== S.page ? ` (last: page ${RECAP.page})` : ""}` : "Make recap"}</button>
         <div class="recap" id="recapOut"></div>`;
     }
