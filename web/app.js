@@ -9,7 +9,11 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "time-12", items: [
+const WHATS_NEW = { id: "notes-13", items: [
+  "<b>Highlights, notes and bookmarks:</b> select text to highlight it, add a note or look a word up. The bookmark button marks a page. Everything is under <b>Contents → Notes</b>, syncs to your other devices, and can be copied or saved as a file.",
+  "<b>Search, People and Recap</b> are under Contents too. Search plays the audiobook from a result; People lists the names so far, never past your page; Recap (with your Anthropic API key) tells you what's happened in the series up to your page.",
+  "<b>Listening:</b> a sleep timer (15, 30 or 60 minutes, or the end of the chapter, with a fade-out), smart rewind after a pause, and a chapter list once the audiobook is synced.",
+  "<b>Collections:</b> group books from their … menu (and number them in a series); filter the shelf by collection.",
   "<b>Reading time:</b> each book shows how long you have spent with it (reading, listening, or both), on the shelf and in its … menu. Time on your phone and PC adds up.",
   "<b>Updates:</b> new versions come from GitHub. The Windows app updates itself (Settings → About). On iPhone, Pagekeeper tells you when there is a new version, and AltStore or SideStore can install it for you.",
   "<b>The welcome guide can be removed</b> from its … menu, and brought back from Settings.",
@@ -41,6 +45,8 @@ const ICON = {
   play:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
   pause:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>',
   plus:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  bm:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4z"/></svg>',
+  bmOn:'<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4z"/></svg>',
   dots:'<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
   rw:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8"/><path d="M3 3v5h5"/></svg>',
   ff:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-9-9 9 9 0 016.4 2.6L21 8"/><path d="M21 3v5h-5"/></svg>',
@@ -203,6 +209,8 @@ function merge(l, r){
   for (const k of PROGRESS) if (prog[k] !== undefined) out[k] = prog[k];
   out.audio = { tracks: trk.tracks || [], url: trk.url || "", tracksAt: trk.tracksAt || 0, track: pos.track || 0, time: pos.time || 0, updatedAt: pos.updatedAt || 0 };
   out.deleted = !!(l.deleted || r.deleted);
+  // notes, highlights, bookmarks and saved words: keep every one, the newest version of each
+  for (const k of ["marks", "vocab"]) { const u = { ...(l[k] || {}) }; for (const [id, v] of Object.entries(r[k] || {})) if (!u[id] || (v.at || 0) >= (u[id].at || 0)) u[id] = v; if (Object.keys(u).length) out[k] = u; }
   // reading time: each device's own count, so keep the larger of each
   const rd = { ...(l.read || {}) }; for (const [k, v] of Object.entries(r.read || {})) rd[k] = Math.max(rd[k] || 0, +v || 0);
   if (Object.keys(rd).length) out.read = rd;
@@ -671,7 +679,8 @@ function render(){
 }
 function renderLibraryBody(){
   const el = $("#body"); if (!el || S.view !== "library") return;
-  const list = Object.entries(S.books).filter(([, b]) => !b.deleted && b.kind === "book").sort((a, b) => (b[1].updatedAt || b[1].addedAt || 0) - (a[1].updatedAt || a[1].addedAt || 0));
+  const shelves = allShelves(); if (S.shelf && !shelves.includes(S.shelf)) S.shelf = null;
+  let list = Object.entries(S.books).filter(([, b]) => !b.deleted && b.kind === "book").sort((a, b) => (b[1].updatedAt || b[1].addedAt || 0) - (a[1].updatedAt || a[1].addedAt || 0));
   const recent = list.find(([, b]) => !b.builtin && b.updatedAt && b.page > 1) || list.find(([, b]) => b.updatedAt && (b.page || 1) > 1);
   let html = "";
   if (recent) {
@@ -681,11 +690,13 @@ function renderLibraryBody(){
       <div class="meta">Page ${b.page || 1}${b.pages ? ` of ${b.pages}` : ""}${where}${readTotal(b) >= 60000 ? ` · read for ${fmtDur(readTotal(b))}${readToday(b) >= 60000 ? ` (${fmtDur(readToday(b))} today)` : ""}` : ""}</div><div class="bar"><i style="width:${pct(b)}%"></i></div></div>
       <button class="btn primary" data-open="${id}">Resume</button></div>`;
   }
+  if (shelves.length) html += `<div class="shelves" role="tablist"><button class="chip" data-shelf="" aria-pressed="${!S.shelf}">All books</button>${shelves.map(n => `<button class="chip" data-shelf="${esc(n)}" aria-pressed="${S.shelf === n}">${esc(n)}</button>`).join("")}</div>`;
+  if (S.shelf) list = list.filter(([, b]) => shelvesOf(b).includes(S.shelf)).sort((a, z) => (a[1].seriesNo ?? 1e9) - (z[1].seriesNo ?? 1e9) || natural(a[1].title || "", z[1].title || ""));
   html += `<div class="grid">`;
   for (const [id, b] of list) {
     html += `<div class="book">
       <button class="open" data-open="${id}" aria-label="Open ${esc(b.title)}">${coverHTML(b)}
-        <span class="btitle">${esc(b.title)}</span><span class="bauthor">${esc(b.author || (b.format === "pdf" ? "PDF" : ""))}</span>
+        <span class="btitle">${b.seriesNo != null && S.shelf ? `<span class="sno">#${esc(String(b.seriesNo))}</span> ` : ""}${esc(b.title)}</span><span class="bauthor">${esc(b.author || (b.format === "pdf" ? "PDF" : ""))}</span>
         <span class="bar"><i style="width:${pct(b)}%"></i></span><span class="meta">${b.pages ? `${pct(b)}% · p. ${b.page || 1} / ${b.pages}` : "Not started"}${b.audio?.tracks?.length ? " · audio" : ""}</span>${readTotal(b) >= 60000 ? `<span class="meta">Read for ${fmtDur(readTotal(b))}</span>` : ""}
       </button>
       <button class="more" data-more="${id}" aria-label="Options for ${esc(b.title)}">${ICON.dots}</button>
@@ -696,6 +707,7 @@ function renderLibraryBody(){
   $("#addTile").onclick = () => $("#bookFile").click();
   el.querySelectorAll("[data-open]").forEach(b => b.onclick = () => openBook(b.dataset.open));
   el.querySelectorAll("[data-more]").forEach(b => b.onclick = () => bookMenu(b.dataset.more));
+  el.querySelectorAll("[data-shelf]").forEach(b => b.onclick = () => { S.shelf = b.dataset.shelf || null; renderLibraryBody(); });
 }
 function bookMenu(id){
   const bk = S.books[id];
@@ -706,11 +718,13 @@ function bookMenu(id){
     ${readTotal(bk) >= 60000 ? `<p>You've spent <b>${fmtDur(readTotal(bk))}</b> with this book${readToday(bk) >= 60000 ? `, ${fmtDur(readToday(bk))} of it today` : ""}.</p>` : ""}
     ${bk.src?.url ? `<p style="word-break:break-all">Download link: ${esc(bk.src.url)}</p>` : ""}
     <div class="row" style="justify-content:flex-start">
+      ${bk.builtin ? "" : `<button class="btn" data-shelves>Collections${bk.seriesNo != null ? ` · #${esc(String(bk.seriesNo))}` : ""}</button>`}
       ${bk.asset || bk.builtin ? "" : `<button class="btn" data-link>${bk.src?.url ? "Change download link" : "Add download link"}</button>`}
       <button class="btn danger" data-del>Remove book</button><button class="btn" data-x>Close</button></div></div>`;
   m.addEventListener("click", e => {
     if (e.target === m || e.target.closest("[data-x]")) m.remove();
     if (e.target.closest("[data-link]")) { m.remove(); askBookLink(id); }
+    if (e.target.closest("[data-shelves]")) { m.remove(); shelfBox(id); }
     if (e.target.closest("[data-del]")) { m.remove(); removeBook(id); }
   });
   document.body.append(m);
@@ -795,6 +809,15 @@ function renderSettings(el){
       <p class="note" style="margin:0">Shown on your other devices, like “page 12 on iPhone”.</p></div>
     </div>
     <div class="panel">
+      <h3>AI recaps</h3>
+      <p class="note" style="margin:0">In a book, <b>Contents → Recap</b> tells you what's happened so far in the book and the earlier books of its series, never past your page. It uses Claude with your own Anthropic API key (from console.anthropic.com), billed to your account: the first recap of a long book costs about a dollar, later ones a few cents. The key stays on this device; only the text you've read so far is sent, straight to Anthropic.</p>
+      <div class="row-btns"><input id="claudeKey" type="password" autocomplete="off" placeholder="${prefs.get("claudeKey") ? "Key saved · paste a new one to replace it" : "sk-ant-…"}" style="flex:1;min-width:200px"><button class="btn primary" id="claudeSave">Save key</button>${prefs.get("claudeKey") ? `<button class="btn" id="claudeDel">Remove key</button>` : ""}</div>
+    </div>
+    <div class="panel">
+      <h3>Listening</h3>
+      <label class="check"><input type="checkbox" id="smartRw" ${prefs.get("smartRewind") === false ? "" : "checked"}> Smart rewind: after a pause, back up a few seconds (longer pauses, a bit more)</label>
+    </div>
+    <div class="panel">
       <h3>Pop-out text</h3>
       <p class="note" style="margin:0">${TAURI ? "A borderless window that stays on top of everything else on your screen." : "A floating panel you can drag around inside Pagekeeper."} It shows the sentence being read aloud, or the page you're on. Change its colors and size from <b>Aa</b> while reading.</p>
       <div class="row-btns"><button class="btn ${prefs.get("capOn") ? "" : "primary"}" id="setCap">${prefs.get("capOn") ? "Hide pop-out" : "Show pop-out"}</button></div>
@@ -806,6 +829,9 @@ function renderSettings(el){
       ${updateNote()}
     </div>`;
   el.querySelectorAll("[data-theme-pick]").forEach(b => b.onclick = () => { prefs.set("theme", b.dataset.themePick); applyTheme(); renderSettings(el); });
+  const ks = $("#claudeSave"); if (ks) ks.onclick = () => { const v = $("#claudeKey").value.trim(); if (!/^sk-ant-/.test(v)) { toast("That doesn't look like an Anthropic API key (it starts with sk-ant-)."); return; } prefs.set("claudeKey", v); toast("Key saved on this device."); renderSettings(el); };
+  const kd = $("#claudeDel"); if (kd) kd.onclick = () => { prefs.set("claudeKey", undefined); toast("Key removed."); renderSettings(el); };
+  const sr = $("#smartRw"); if (sr) sr.onchange = () => prefs.set("smartRewind", sr.checked ? undefined : false);
   const gb = $("#guideBack"); if (gb) gb.onclick = () => {
     // a fresh copy (a removed book stays removed everywhere, so this one gets a new name)
     const id = "guide-" + Date.now().toString(36);
@@ -1194,7 +1220,8 @@ function renderReader(){
       <button class="ib" id="rBack" aria-label="Back to library">${ICON.back}</button>
       <div class="rt"><b>${esc(b.title)}</b><span id="rPos"></span></div>
       <button class="ib" id="rPop" aria-label="${prefs.get("capOn") ? "Hide" : "Show"} pop-out text" title="Pop-out text" aria-pressed="${!!prefs.get("capOn")}">${ICON.pop}</button>
-      <button class="ib" id="rToc" aria-label="Contents">${ICON.list}</button>
+      <button class="ib" id="rMark" aria-label="Bookmark this page" aria-pressed="false">${ICON.bm}</button>
+      <button class="ib" id="rToc" aria-label="Contents, search, notes and more">${ICON.list}</button>
       <button class="ib" id="rType" aria-label="Text settings">${ICON.type}</button>
       <button class="ib" id="rAudio" aria-label="Audio" aria-pressed="${S.dock}">${ICON.head}</button>
     </div>
@@ -1215,6 +1242,7 @@ function renderReader(){
   $("#rSlide").oninput = e => { $("#rNum").textContent = `${e.target.value} / ${total()}`; };
   $("#rSlide").onchange = e => goto(+e.target.value);
   $("#rToc").onclick = () => toggleSheet("toc");
+  $("#rMark").onclick = toggleBookmark;
   $("#rType").onclick = () => toggleSheet("type");
   $("#rAudio").onclick = () => {
     S.dock = !S.dock;
@@ -1238,6 +1266,12 @@ function renderReader(){
     if (S.syncPick && !e.target.closest("button,a,input")) { followPick(e); return; }
     if (e.target.closest("button,a,input")) return;
     if (window.getSelection && String(window.getSelection())) return;
+    // tapped a highlight: show it, with its note
+    const cp = document.caretPositionFromPoint ? document.caretPositionFromPoint(e.clientX, e.clientY) : null;
+    const cr = !cp && document.caretRangeFromPoint ? document.caretRangeFromPoint(e.clientX, e.clientY) : null;
+    const node = cp ? cp.offsetNode : cr && cr.startContainer, off = cp ? cp.offset : cr && cr.startOffset;
+    const hit = node && domToPos(node, off); const mk = hit != null && markAt(hit);
+    if (mk) { markPopup(mk); return; }
     const r = main.getBoundingClientRect(); const x = e.clientX - r.left;
     if (x > r.width * .8) goto(S.page + 1); else if (x < r.width * .2) goto(S.page - 1);
   });
@@ -1269,6 +1303,7 @@ async function showPage(){
   }
   main.scrollTop = 0;
   updateReaderChrome();
+  paintMarks(); paintBookmarkBtn(); closeSelBar();
   if (!capNow.speaking) capSend();
 }
 function renderMissing(main, id, failed){
@@ -1336,7 +1371,8 @@ function renderSheet(){
   const el = $("#sheet"); if (!el) return;
   if (!S.sheet) { el.innerHTML = ""; return; }
   const c = S.content[S.cur];
-  if (S.sheet === "toc") {
+  if (S.sheet === "toc") { renderBookSheet(el); return; }
+  if (false) {
     let items = "";
     if (c && c.kind === "text") {
       const curIdx = c.toc.reduce((acc, t, i) => t.page <= S.page ? i : acc, 0);
@@ -2139,6 +2175,7 @@ function updateDock(){
         ${volRow}
         <div class="pl-row"><label>Voice</label><select id="ttsVoiceSel" aria-label="Voice"><option value="">Device default</option>${voices.map(v => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === want ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`).join("")}</select></div>
         <div class="pl-row"><label>Highlight</label><div class="chips">${[["sentence","Sentence"],["word","Word"],["off","Off"]].map(([k, l]) => `<button class="chip" data-hl="${k}" aria-pressed="${hlMode === k}">${l}</button>`).join("")}</div></div>
+        ${sleepRow()}
         ${wifiRow(b)}
         ${popRow}
       </div>`;
@@ -2212,6 +2249,8 @@ function updateDock(){
         ${speedRow(rate)}
         ${volRow}
         <div class="pl-row"><label>Skip</label><div class="chips">${SKIPS.map(s => `<button class="chip" data-skip="${s}" aria-pressed="${s === sk}">${s} sec</button>`).join("")}</div></div>
+        ${chapterRow(b)}
+        ${sleepRow()}
         ${followRow(b)}
         ${bigRow(b)}
         <div class="pl-row"><label>Parts</label><button class="btn" id="auList">${S.showTracks ? "Hide parts" : `Show all ${tracks.length}`}</button></div>
@@ -2277,6 +2316,7 @@ function updateDock(){
   const vs = $("#auVol"); if (vs) vs.oninput = () => { paintRange(vs); setVol(+vs.value); };
   const mu = $("#auMute"); if (mu) mu.onclick = () => { const v = shownVol(); if (v > 0) { lastVol = v; setVol(0); } else setVol(lastVol || 0.7); };
   if (big && IOS && vol == null) Native.call({ op: "volumeGet" }).then(v => { vol = +v; paintVol(); }).catch(() => {});
+  bindExtrasDock();
   const ws = $("#wifiShare"); if (ws) ws.onclick = () => shareToPhone(S.cur);
   const wx = $("#wifiStop"); if (wx) wx.onclick = stopSharing;
   const wg = $("#wifiGet"); if (wg) wg.onclick = () => getFromPC(S.cur);
@@ -3007,6 +3047,525 @@ function renderFloatCap(p){
   else if (p.word) { const [s, n] = p.word; box.innerHTML = esc(p.text.slice(0, s)) + `<mark>${esc(p.text.slice(s, s + n))}</mark>` + esc(p.text.slice(s + n)); }
   else box.textContent = p.text;
   const m = box.querySelector("mark"); if (m) m.scrollIntoView({ block: "nearest" }); else if (!p.speaking) box.scrollTop = 0;
+}
+
+/* ======================================================================================
+   Notes & highlights, bookmarks, search, words, people & places, collections, the sleep
+   timer, smart rewind, chapters in the player, and AI recaps.
+   ====================================================================================== */
+
+/* ---------- where things are in the text ----------
+   A place in a book is a character position in its whole text (the same count follow-along uses).
+   The page shows each sentence as a <span data-s>; these turn screen selections into positions and back. */
+function pageSpans(){ return [...document.querySelectorAll(".page [data-s]")]; }
+function pageBase(){ const c = S.content[S.cur]; const ix = c && textIndex(c); return ix && ix.starts ? ix.starts[S.page - 1] : 0; }
+function offsetIn(span, node, off){   // characters before (node, off) inside this sentence span
+  let n = 0; const w = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+  for (let t = w.nextNode(); t; t = w.nextNode()) { if (t === node) return n + off; n += t.length; }
+  return n;
+}
+function domToPos(node, off){
+  const el = (node.nodeType === 3 ? node.parentElement : node)?.closest?.("[data-s]"); if (!el) return null;
+  let n = 0; for (const sp of pageSpans()) { if (sp === el) return pageBase() + n + (node.nodeType === 3 ? offsetIn(sp, node, off) : 0); n += sp.textContent.length; }
+  return null;
+}
+function rangeFor(s, e){   // a DOM range for text positions [s, e) on this page, clipped to it
+  const base = pageBase(); let n = 0; const r = document.createRange(); let started = false;
+  for (const sp of pageSpans()) {
+    const len = sp.textContent.length, a = base + n, b = a + len; n += len;
+    if (b <= s || a >= e) continue;
+    const w = document.createTreeWalker(sp, NodeFilter.SHOW_TEXT); let m = a;
+    for (let t = w.nextNode(); t; t = w.nextNode()) {
+      const ta = m, tb = m + t.length; m = tb;
+      if (!started && s < tb) { r.setStart(t, Math.max(0, s - ta)); started = true; }
+      if (started && e <= tb) { r.setEnd(t, Math.max(0, e - ta)); return r; }
+    }
+    if (started) { const last = sp.lastChild; if (last && last.nodeType === 3) r.setEnd(last, last.length); }
+  }
+  return started ? r : null;
+}
+function pageTexts(c){   // each page's text, exactly as the page shows it
+  if (c._ptext) return c._ptext;
+  return (c._ptext = c.pages.map(blocks => blocks.map(([t, x]) => t === "h" ? x : splitS(x).join("")).join("")));
+}
+function pageOfPos(c, pos){ const st = textIndex(c).starts; let lo = 0, hi = st.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (st[mid] <= pos) lo = mid; else hi = mid - 1; } return lo + 1; }
+
+/* ---------- marks: highlights, notes, bookmarks (they sync) ---------- */
+const HL_COLORS = { yellow: "Yellow", green: "Green", blue: "Blue", pink: "Pink" };
+const markId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const liveMarks = b => Object.entries((b && b.marks) || {}).filter(([, m]) => !m.del).map(([id, m]) => ({ id, ...m }));
+function putMark(bookId, id, m){
+  const b = S.books[bookId]; const marks = { ...(b.marks || {}) };
+  marks[id] = { ...(marks[id] || {}), ...m, at: Date.now() };
+  save(bookId, { marks }); paintMarks();
+  if (S.sheet === "toc" && S.bookTab === "notes") renderSheet();
+}
+const delMark = (bookId, id) => putMark(bookId, id, { del: 1 });
+// Draw this page's highlights (CSS highlights leave the text itself untouched).
+function paintMarks(){
+  if (!window.CSS || !CSS.highlights || !window.Highlight) return;
+  for (const k of [...Object.keys(HL_COLORS), "note", "find"]) CSS.highlights.delete("pk-" + k);
+  const c = S.content[S.cur]; if (S.view !== "reader" || !c || c.kind !== "text") return;
+  const base = pageBase(), end = base + (pageTexts(c)[S.page - 1] || "").length;
+  const sets = {};
+  for (const m of liveMarks(S.books[S.cur])) {
+    if (m.k !== "hl" || m.e <= base || m.s >= end) continue;
+    const r = rangeFor(m.s, m.e); if (!r) continue;
+    (sets[m.c || "yellow"] ||= []).push(r); if (m.n) (sets.note ||= []).push(r);
+  }
+  if (S.find && S.find.book === S.cur && S.find.e > base && S.find.s < end) { const r = rangeFor(S.find.s, S.find.e); if (r) sets.find = [r]; }
+  for (const [k, rs] of Object.entries(sets)) CSS.highlights.set("pk-" + k, new Highlight(...rs));
+}
+function markAt(pos){ return liveMarks(S.books[S.cur]).find(m => m.k === "hl" && pos >= m.s && pos < m.e); }
+function isBookmarked(){ const c = S.content[S.cur]; if (!c || c.kind !== "text") return liveMarks(S.books[S.cur]).find(m => m.k === "bm" && m.p === S.page); return liveMarks(S.books[S.cur]).find(m => m.k === "bm" && m.p === S.page); }
+function toggleBookmark(){
+  const b = S.books[S.cur], c = S.content[S.cur]; if (!b) return;
+  const on = isBookmarked();
+  if (on) { delMark(S.cur, on.id); toast("Bookmark removed."); }
+  else {
+    const text = c && c.kind === "text" ? (pageTexts(c)[S.page - 1] || "").trim().slice(0, 140) : "";
+    putMark(S.cur, markId(), { k: "bm", p: S.page, s: c && c.kind === "text" ? pageBase() : 0, t: text });
+    toast("Page bookmarked. Find it under Contents → Notes.");
+  }
+  paintBookmarkBtn();
+}
+function paintBookmarkBtn(){ const btn = $("#rMark"); if (!btn) return; const on = !!isBookmarked(); btn.setAttribute("aria-pressed", on); btn.innerHTML = on ? ICON.bmOn : ICON.bm; btn.setAttribute("aria-label", on ? "Remove bookmark" : "Bookmark this page"); }
+
+/* ---------- the selection bar: highlight, note, define, copy, search ---------- */
+function selInfo(){
+  const sel = window.getSelection && window.getSelection(); if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const r = sel.getRangeAt(0); if (!$("#rMain") || !$("#rMain").contains(r.commonAncestorContainer)) return null;
+  let s = domToPos(r.startContainer, r.startOffset), e = domToPos(r.endContainer, r.endOffset); if (s === null || e === null || e <= s) return null;
+  const text = r.toString().trim(); if (!text) return null;
+  return { s, e, text, rect: r.getBoundingClientRect() };
+}
+function closeSelBar(){ const x = $("#selbar"); if (x) x.remove(); }
+function showSelBar(){
+  closeSelBar();
+  const info = selInfo(); if (!info) return;
+  const one = /^[\p{L}’'-]+$/u.test(info.text) && info.text.length < 40;
+  const bar = document.createElement("div"); bar.id = "selbar"; bar.setAttribute("role", "toolbar");
+  bar.innerHTML = `${Object.keys(HL_COLORS).map(k => `<button class="sw sw-${k}" data-hl="${k}" aria-label="Highlight ${HL_COLORS[k].toLowerCase()}"></button>`).join("")}
+    <button data-act="note">Note</button>${one ? `<button data-act="define">Define</button>` : ""}<button data-act="copy">Copy</button><button data-act="find">Search</button>`;
+  document.body.append(bar);
+  const top = info.rect.top - bar.offsetHeight - 10;
+  bar.style.top = Math.max(8, top < 8 ? info.rect.bottom + 10 : top) + "px";
+  bar.style.left = Math.max(8, Math.min(innerWidth - bar.offsetWidth - 8, info.rect.left + info.rect.width / 2 - bar.offsetWidth / 2)) + "px";
+  bar.addEventListener("pointerdown", e => e.preventDefault());   // keep the selection
+  bar.onclick = e => {
+    const b = e.target.closest("button"); if (!b) return;
+    const sel = window.getSelection(); const page = S.page;
+    if (b.dataset.hl) putMark(S.cur, markId(), { k: "hl", s: info.s, e: info.e, p: page, t: info.text.slice(0, 600), c: b.dataset.hl });
+    else if (b.dataset.act === "note") noteBox(null, { k: "hl", s: info.s, e: info.e, p: page, t: info.text.slice(0, 600), c: "yellow" });
+    else if (b.dataset.act === "define") defineWord(info.text);
+    else if (b.dataset.act === "copy") { navigator.clipboard && navigator.clipboard.writeText(info.text).then(() => toast("Copied."), () => {}); }
+    else if (b.dataset.act === "find") { S.bookTab = "search"; S.findQ = info.text.slice(0, 80); S.sheet = "toc"; renderSheet(); }
+    sel && sel.removeAllRanges(); closeSelBar();
+  };
+}
+document.addEventListener("selectionchange", () => { clearTimeout(showSelBar.t); showSelBar.t = setTimeout(() => { if (S.view === "reader" && selInfo()) showSelBar(); else closeSelBar(); }, 350); });
+// Tapping a highlight shows it (and its note), with Edit and Delete.
+function markPopup(m){
+  const box = document.createElement("div"); box.className = "modal-back";
+  box.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>${m.n ? "Note" : "Highlight"}</h3>
+    <blockquote class="mq hl-${esc(m.c || "yellow")}">${esc(m.t || "")}</blockquote>${m.n ? `<p>${esc(m.n)}</p>` : ""}
+    <div class="row" style="justify-content:flex-start;flex-wrap:wrap">${Object.keys(HL_COLORS).map(k => `<button class="sw sw-${k}" data-c="${k}" aria-label="${HL_COLORS[k]}" aria-pressed="${(m.c || "yellow") === k}"></button>`).join("")}
+      <button class="btn" data-note>${m.n ? "Edit note" : "Add note"}</button><button class="btn danger" data-del>Delete</button><button class="btn" data-x>Close</button></div></div>`;
+  box.addEventListener("click", e => {
+    if (e.target === box || e.target.closest("[data-x]")) box.remove();
+    const c = e.target.closest("[data-c]"); if (c) { putMark(S.cur, m.id, { c: c.dataset.c }); box.remove(); }
+    if (e.target.closest("[data-note]")) { box.remove(); noteBox(m.id, m); }
+    if (e.target.closest("[data-del]")) { box.remove(); delMark(S.cur, m.id); toast("Deleted."); }
+  });
+  document.body.append(box);
+}
+function noteBox(id, m){
+  const box = document.createElement("div"); box.className = "modal-back";
+  box.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>Note</h3><blockquote class="mq">${esc(m.t || "")}</blockquote>
+    <textarea id="noteIn" rows="4" style="width:100%;box-sizing:border-box" placeholder="Your note">${esc(m.n || "")}</textarea>
+    <div class="row"><button class="btn" data-x>Cancel</button><button class="btn primary" data-ok>Save</button></div></div>`;
+  box.addEventListener("click", e => {
+    if (e.target === box || e.target.closest("[data-x]")) box.remove();
+    if (e.target.closest("[data-ok]")) { const n = $("#noteIn", box).value.trim(); box.remove(); putMark(S.cur, id || markId(), { ...m, n }); toast("Note saved."); }
+  });
+  document.body.append(box); $("#noteIn", box).focus();
+}
+function exportNotes(bookId){
+  const b = S.books[bookId], ms = liveMarks(b).sort((x, y) => (x.s || 0) - (y.s || 0));
+  const lines = [`${b.title}${b.author ? " — " + b.author : ""}`, `Notes and highlights from Pagekeeper, ${new Date().toLocaleDateString()}`, ""];
+  for (const m of ms) {
+    if (m.k === "bm") lines.push(`[Bookmark] page ${m.p}`);
+    else lines.push(`Page ${m.p}: “${m.t}”` + (m.n ? `\n  Note: ${m.n}` : ""));
+    lines.push("");
+  }
+  const vs = Object.values(b.vocab || {}).filter(v => !v.del);
+  if (vs.length) { lines.push("Words looked up:"); for (const v of vs) lines.push(`- ${v.w}: ${v.d}`); }
+  return lines.join("\n");
+}
+
+/* ---------- search inside the book ---------- */
+function searchBook(c, q){
+  const out = []; if (!q || q.trim().length < 2) return out;
+  const needle = q.trim().toLowerCase(), pt = pageTexts(c), st = textIndex(c).starts;
+  for (let p = 0; p < pt.length && out.length < 300; p++) {
+    const low = pt[p].toLowerCase(); let i = low.indexOf(needle);
+    while (i >= 0 && out.length < 300) {
+      out.push({ page: p + 1, s: st[p] + i, e: st[p] + i + needle.length, snip: pt[p].slice(Math.max(0, i - 50), i + needle.length + 70) });
+      i = low.indexOf(needle, i + needle.length);
+    }
+  }
+  return out;
+}
+async function jumpTo(pos, len = 0){
+  const c = S.content[S.cur]; if (!c) return;
+  S.find = { book: S.cur, s: pos, e: pos + Math.max(1, len) };
+  S.sheet = null; renderSheet();
+  if (followActive()) S.followHold = true;
+  await goto(pageOfPos(c, pos), true);
+  paintMarks();
+  const r = rangeFor(pos, pos + Math.max(1, len)); if (r) { const el = r.startContainer.parentElement; el && el.scrollIntoView({ block: "center" }); }
+  setTimeout(() => { if (S.find && S.find.s === pos) { S.find = null; paintMarks(); } }, 6000);
+}
+// Where in the audiobook a place in the text is read (needs automatic sync).
+function audioForPos(b, c, pos){
+  const ix = textIndex(c), pts = syncPoints(b, ix); if (!pts.length) return null;
+  const f = pos / ix.total; let best = null;
+  for (const p of pts) { if (p[2] <= f) best = p; else break; }
+  return best ? { ti: best[0], t: best[1] } : { ti: pts[0][0], t: pts[0][1] };
+}
+async function playFromPos(pos){
+  const b = S.books[S.cur], c = S.content[S.cur]; const a = b && c && audioForPos(b, c, pos); if (!a) return false;
+  S.followHold = false;
+  if (await loadTrack(a.ti, a.t)) { au.play().catch(() => {}); S.dock = true; updateDock(); followTick(true); }
+  return true;
+}
+
+/* ---------- words: definitions and a word list ---------- */
+async function defineWord(word){
+  const w = word.toLowerCase().replace(/[’']s$/, "");
+  const box = document.createElement("div"); box.className = "modal-back";
+  box.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>${esc(w)}</h3><div id="defBody"><p class="note">Looking it up…</p></div>
+    <div class="row"><button class="btn" data-x>Close</button><button class="btn primary" data-save disabled>Save to my words</button></div></div>`;
+  box.addEventListener("click", e => { if (e.target === box || e.target.closest("[data-x]")) box.remove(); });
+  document.body.append(box);
+  let first = "";
+  try {
+    const r = await Native.text(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(w)}`);
+    const j = JSON.parse(r.text);
+    if (!Array.isArray(j) || !j.length) throw new Error("none");
+    const e0 = j[0], ph = (e0.phonetics || []).map(p => p.text).find(Boolean) || e0.phonetic || "";
+    const means = j.flatMap(e => e.meanings || []).slice(0, 4);
+    first = (means[0] && means[0].definitions && means[0].definitions[0] && means[0].definitions[0].definition) || "";
+    $("#defBody", box).innerHTML = `${ph ? `<p class="note">${esc(ph)}</p>` : ""}${means.map(m => `<p><i>${esc(m.partOfSpeech || "")}</i> ${esc(((m.definitions || [])[0] || {}).definition || "")}</p>`).join("")}`;
+    $("[data-save]", box).disabled = false;
+  } catch {
+    $("#defBody", box).innerHTML = `<p>No definition found${navigator.onLine === false ? " (you're offline)" : ""}. It may be a name or a word made up for this book.</p>`;
+  }
+  $("[data-save]", box).onclick = () => {
+    const b = S.books[S.cur]; const vocab = { ...(b.vocab || {}) };
+    vocab[w] = { w, d: first.slice(0, 300), p: S.page, at: Date.now() };
+    save(S.cur, { vocab }); box.remove(); toast(`Saved “${esc(w)}” to your words (Contents → Words).`);
+  };
+}
+
+/* ---------- people & places: names that have come up so far (never further than you've read) ---------- */
+const NAME_STOP = new Set(("I A An The He She It They We You Your My Our His Her Its Their This That These Those There Here Then When Where What Who Why How " +
+  "But And Or Nor For So Yet If Not No Yes Oh Ah Well Now Still Even Just Only All Some Any Each Every One Two Three Mr Mrs Ms Dr Sir Lady Lord " +
+  "Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March April May June July August September October November December " +
+  "Chapter Part Book Prologue Epilogue After Before As At By In On Of To From With Without Into Upon Through Then Again Perhaps Maybe Let Do Did Does Is Was Are Were Be Been Have Had Has Can Could Would Should Will Shall Must Might").split(" "));
+function namesSoFar(c, upto){
+  const key = S.cur + ":" + upto; if (namesSoFar.cache && namesSoFar.cache.key === key) return namesSoFar.cache.list;
+  const pt = pageTexts(c), st = textIndex(c).starts, found = new Map();
+  // a capitalized word (up to three in a row); an apostrophe only inside a name like Muad’Dib,
+  // so “I’m” and “It’s” don't count and “Duke’s” counts as “Duke”
+  const RE = /(^|[^\p{L}’'])(\p{Lu}\p{Ll}+(?:[’']\p{Lu}\p{Ll}+)?(?:[ -]\p{Lu}\p{Ll}+(?:[’']\p{Lu}\p{Ll}+)?){0,2})(?!\p{Ll}|[’']\p{Ll}{2}|[’'][md]\b)/gu;
+  for (let p = 0; p < Math.min(upto, pt.length); p++) {
+    for (const m of pt[p].matchAll(RE)) {
+      const name = m[2], at = m.index + m[1].length;
+      const before = pt[p].slice(Math.max(0, at - 3), at);
+      if (/^$|[.!?…]["'”’)\]]?\s*$|^\s*$/.test(before) && !/\p{L}/u.test(before)) continue;   // first word of a sentence: could be any word
+      if (/[.!?…]["'”’)\]]?\s+$/.test(before)) continue;
+      const words = name.split(/[ -]/); if (words.every(w => NAME_STOP.has(w))) continue;
+      const clean = NAME_STOP.has(words[0]) && words.length > 1 ? words.slice(1).join(" ") : name;
+      const e = found.get(clean) || { name: clean, n: 0, first: p + 1, hits: [] };
+      e.n++; if (e.hits.length < 600) e.hits.push(st[p] + at);
+      found.set(clean, e);
+    }
+  }
+  const list = [...found.values()].filter(e => e.n >= 3).sort((a, b) => b.n - a.n).slice(0, 80);
+  namesSoFar.cache = { key, list };
+  return list;
+}
+
+/* ---------- collections (and a book's number in its series) ---------- */
+const shelvesOf = b => (b && b.shelves) || [];
+const allShelves = () => [...new Set(Object.values(S.books).filter(b => !b.deleted && b.kind === "book").flatMap(shelvesOf))].sort(natural);
+function shelfBox(id){
+  const b = S.books[id]; const mine = new Set(shelvesOf(b));
+  const box = document.createElement("div"); box.className = "modal-back";
+  const draw = () => {
+    box.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>Collections</h3>
+      <p class="note">Group books into collections, like a series or “To read”. A book can be in several.</p>
+      <div class="shelflist">${[...new Set([...allShelves(), ...mine])].map(n => `<label class="check"><input type="checkbox" data-sh="${esc(n)}" ${mine.has(n) ? "checked" : ""}> ${esc(n)}</label>`).join("") || `<p class="note">No collections yet.</p>`}</div>
+      <div class="row" style="justify-content:flex-start"><input id="shNew" placeholder="New collection, e.g. Dune series" style="flex:1;min-width:0"><button class="btn" data-add>Add</button></div>
+      <label class="field" style="display:block;margin-top:10px">Number in its series <input id="shNo" type="number" min="0" step="0.5" value="${b.seriesNo ?? ""}" placeholder="e.g. 3" style="width:90px"></label>
+      <p class="note">With a number, the recap includes the earlier books of the series.</p>
+      <div class="row"><button class="btn" data-x>Cancel</button><button class="btn primary" data-ok>Save</button></div></div>`;
+  };
+  draw();
+  box.addEventListener("click", e => {
+    if (e.target === box || e.target.closest("[data-x]")) box.remove();
+    const cb = e.target.closest("[data-sh]"); if (cb) { if (cb.checked) mine.add(cb.dataset.sh); else mine.delete(cb.dataset.sh); }
+    if (e.target.closest("[data-add]")) { const n = $("#shNew", box).value.trim().slice(0, 60); if (n) { mine.add(n); const no = $("#shNo", box).value; draw(); $("#shNo", box).value = no; } }
+    if (e.target.closest("[data-ok]")) {
+      const no = $("#shNo", box).value.trim();
+      save(id, { shelves: [...mine].sort(natural), seriesNo: no === "" ? null : +no }); box.remove(); render();
+    }
+  });
+  document.body.append(box);
+}
+
+/* ---------- sleep timer and smart rewind ---------- */
+const SLEEP = { end: 0, chapter: false, fade: null };
+function sleepLeft(){ return SLEEP.end ? Math.max(0, SLEEP.end - Date.now()) : 0; }
+function setSleep(v){
+  clearInterval(SLEEP.fade); SLEEP.fade = null;
+  if (v === "off") { SLEEP.end = 0; SLEEP.chapter = false; toast("Sleep timer off."); }
+  else if (v === "chapter") { SLEEP.end = 0; SLEEP.chapter = true; SLEEP.chapAt = nextChapterStop(); toast("Stops at the end of this chapter."); }
+  else { SLEEP.chapter = false; SLEEP.end = Date.now() + (+v) * 60000; toast(`Stops in ${v} minutes.`); }
+  if (S.dock) updateDock();
+}
+// The text position where the current chapter ends (for "end of chapter").
+function nextChapterStop(){
+  const c = S.content[S.cur]; if (!c || c.kind !== "text" || !c.toc) return null;
+  const nxt = c.toc.find(t => t.page > S.page); if (!nxt) return null;
+  return { page: nxt.page, pos: textIndex(c).starts[nxt.page - 1] };
+}
+function sleepNow(){
+  const playing = (auBook && !au.paused) || (S.reading && !TTS.paused);
+  SLEEP.end = 0; SLEEP.chapter = false;
+  if (!playing) { if (S.dock) updateDock(); return; }
+  if (auBook && !au.paused) {
+    // fade out over about 8 seconds, then pause
+    const vol = au.volume; let k = 0;
+    SLEEP.fade = setInterval(() => { k++; au.volume = Math.max(0, vol * (1 - k / 16)); if (k >= 16) { clearInterval(SLEEP.fade); SLEEP.fade = null; au.pause(); au.volume = vol; if (S.dock) updateDock(); } }, 500);
+  } else if (S.reading && !TTS.paused) ttsPlayPause();
+  toast("Sleep timer: stopped.", null, 6000);
+}
+setInterval(() => {
+  if (SLEEP.end && Date.now() >= SLEEP.end) sleepNow();
+  if (SLEEP.chapter && SLEEP.chapAt) {
+    const c = S.content[S.cur];
+    let past = S.page >= SLEEP.chapAt.page;
+    if (auBook && auBook.id === S.cur && c && c.kind === "text" && S.books[S.cur].sync) past = S.page >= SLEEP.chapAt.page;
+    if (past) sleepNow();
+  }
+  const el = $("#sleepLeft"); if (el) el.textContent = SLEEP.end ? fmtClock(sleepLeft()) : SLEEP.chapter ? "end of chapter" : "";
+}, 1000);
+const fmtClock = ms => { const s = Math.ceil(ms / 1000); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+function sleepRow(){
+  const cur = SLEEP.end ? "time" : SLEEP.chapter ? "chapter" : "off";
+  return `<div class="pl-row"><label>Sleep</label><div class="chips">${[["off", "Off"], ["15", "15 min"], ["30", "30 min"], ["60", "1 h"], ["chapter", "End of chapter"]].map(([v, l]) => `<button class="chip" data-sleep="${v}" aria-pressed="${(v === "off" && cur === "off") || (v === "chapter" && cur === "chapter")}">${l}</button>`).join("")}</div><span class="note" id="sleepLeft">${SLEEP.end ? fmtClock(sleepLeft()) : SLEEP.chapter ? "end of chapter" : ""}</span></div>`;
+}
+// Smart rewind: after a pause, back up a little so you catch the end of the last sentence.
+let pausedAt = 0;
+au.addEventListener("pause", () => { if (!au.seeking && !au.ended) pausedAt = Date.now(); });
+au.addEventListener("play", () => {
+  if (!pausedAt || prefs.get("smartRewind") === false) return;
+  const gap = (Date.now() - pausedAt) / 1000; pausedAt = 0;
+  const back = gap < 5 ? 0 : gap < 60 ? 2 : gap < 600 ? 5 : gap < 3600 ? 10 : 20;
+  if (back && au.currentTime > back) au.currentTime -= back;
+});
+// Chapters in the player: the book's own chapters, placed in the audio by automatic sync.
+function chapterRow(b){
+  const c = S.content[S.cur]; if (!c || c.kind !== "text" || !c.toc || !c.toc.length || !syncPoints(b, textIndex(c)).length) return "";
+  const st = textIndex(c).starts, cur = c.toc.reduce((acc, t, i) => t.page <= S.page ? i : acc, 0);
+  return `<div class="pl-row"><label>Chapter</label><select id="chapSel" aria-label="Jump to a chapter">${c.toc.map((t, i) => `<option value="${st[t.page - 1]}" ${i === cur ? "selected" : ""}>${esc(t.title.slice(0, 60))}</option>`).join("")}</select></div>`;
+}
+function bindExtrasDock(){
+  document.querySelectorAll("[data-sleep]").forEach(b => b.onclick = () => setSleep(b.dataset.sleep));
+  const cs = $("#chapSel"); if (cs) cs.onchange = () => { const pos = +cs.value; jumpTo(pos); playFromPos(pos); };
+}
+
+/* ---------- AI recap: what's happened in the series so far, never past where you are ----------
+   Each chapter you've read is summarized once (and kept on this device); the recap is then written from
+   those summaries plus the text of the chapter you're in, up to the end of your page. Earlier books in the
+   series come from their own chapter summaries if they're in your library. The requests go straight from
+   this device to Anthropic with your API key. */
+const RECAP_MODEL = "claude-opus-5-5";
+let ClaudeSDK = null;
+async function claudeClient(){
+  const key = prefs.get("claudeKey"); if (!key) throw new Error("Add your Anthropic API key in Settings first.");
+  if (!ClaudeSDK) ClaudeSDK = (await import("./vendor/anthropic-sdk.js")).default;
+  return new ClaudeSDK({ apiKey: key, dangerouslyAllowBrowser: true });
+}
+const textOfPages = (c, a, b) => c.pages.slice(a - 1, b).map(blocks => blocks.map(([t, x]) => t === "h" ? "\n## " + x + "\n" : x).join("\n\n")).join("\n\n");
+// The book in chapters (long ones split), up to and including page `upto`.
+function recapUnits(c, upto){
+  const toc = c.toc && c.toc.length ? c.toc : [{ title: "Start", page: 1 }], pt = pageTexts(c), units = [];
+  toc.forEach((t, i) => {
+    if (t.page > upto) return;
+    const chapEnd = toc[i + 1] ? toc[i + 1].page - 1 : c.pages.length;
+    const whole = chapEnd <= upto;   // a finished chapter is summarized; the one you are in is read as it is
+    const end = Math.min(upto, chapEnd);
+    for (let a = t.page; a <= end;) {
+      let b = a, len = 0; while (b <= end && len < 60000) { len += (pt[b - 1] || "").length; b++; }
+      units.push({ title: t.title, a, b: b - 1, whole }); a = b;
+    }
+  });
+  return units;
+}
+const sumKey = (bookId, u, c) => `__sum_${bookId}_${u.a}_${u.b}_${(textIndex(c).total)}`;
+async function summarizeUnit(client, book, c, u){
+  const text = textOfPages(c, u.a, u.b);
+  if (text.length < 1500) return text.trim();   // short enough to use as it is
+  const res = await client.beta.messages.create({
+    model: RECAP_MODEL, max_tokens: 3000, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default",
+    output_config: { effort: "low" },
+    system: "You write chapter summaries that a reader will use to remember a book. Cover what happens, who is involved, what changes, and any reveals, in plain prose of 120 to 220 words. Use only this text; don't add anything from outside it. If the text is front matter (copyright, praise, contents, dedication), reply with exactly: FRONT MATTER",
+    messages: [{ role: "user", content: `Book: ${book.title}${book.author ? " by " + book.author : ""}\nSection: ${u.title} (pages ${u.a}–${u.b})\n\n<text>\n${text}\n</text>` }],
+  });
+  if (res.stop_reason === "refusal") return "";
+  return res.content.filter(x => x.type === "text").map(x => x.text).join("").trim();
+}
+// Earlier books of the same series in the library (same collection, lower number).
+function seriesBefore(b){
+  if (b.seriesNo == null || !shelvesOf(b).length) return [];
+  return Object.entries(S.books).filter(([id, x]) => x !== b && !x.deleted && x.kind === "book" && x.seriesNo != null && x.seriesNo < b.seriesNo && shelvesOf(x).some(s => shelvesOf(b).includes(s)))
+    .sort((a, z) => a[1].seriesNo - z[1].seriesNo);
+}
+async function recapPlan(id){
+  const b = S.books[id], c = await loadContent(id);
+  if (!c || c.kind !== "text") return { err: "Recaps work with EPUB and text books." };
+  const parts = [];
+  for (const [pid, pb] of seriesBefore(b)) {
+    let pc = null; try { pc = await loadContent(pid); } catch {}
+    if (pc && pc.kind === "text") parts.push({ id: pid, book: pb, c: pc, units: recapUnits(pc, pc.pages.length), prev: true });
+  }
+  const units = recapUnits(c, S.page);
+  parts.push({ id, book: b, c, units: units.filter(u => u.whole), live: units.filter(u => !u.whole), prev: false });
+  let newChars = 0, cached = 0, total = 0;
+  for (const p of parts) for (const u of p.units) { total++; if (await idb.get(sumKey(p.id, u, p.c))) cached++; else newChars += Math.max(0, textOfPages(p.c, u.a, u.b).length); }
+  const missing = b.seriesNo != null ? Math.max(0, Math.ceil(b.seriesNo) - 1 - parts.filter(p => p.prev).length) : 0;
+  const cost = newChars / 4 / 1e6 * 4 + (total - cached) * 300 / 1e6 * 20 + 0.05;   // rough, Opus 5.5 prices
+  return { parts, newChars, cached, total, missing, cost };
+}
+const RECAP = { busy: false, text: "", page: 0, status: "" };
+async function makeRecap(id){
+  if (RECAP.busy) return;
+  RECAP.busy = true; RECAP.text = ""; RECAP.status = "Getting ready…"; paintRecap();
+  try {
+    const client = await claudeClient(), plan = await recapPlan(id); if (plan.err) throw new Error(plan.err);
+    // 1. summaries of every chapter read so far (three at a time; kept for next time)
+    const jobs = []; for (const p of plan.parts) for (const u of p.units) jobs.push({ p, u });
+    let done = 0; const sums = new Map();
+    const work = async () => { for (;;) { const j = jobs.shift(); if (!j) return;
+      const key = sumKey(j.p.id, j.u, j.p.c); let s = await idb.get(key);
+      if (s == null) { s = await summarizeUnit(client, j.p.book, j.p.c, j.u); await idb.put(key, s); }
+      sums.set(key, s); done++; RECAP.status = `Reading what you've read so far… ${done} of ${plan.total} sections`; paintRecap();
+    } };
+    await Promise.all([work(), work(), work()]);
+    // 2. the recap itself, written as it streams in
+    const cur = plan.parts[plan.parts.length - 1];
+    let material = "";
+    for (const p of plan.parts) {
+      material += `\n\n# ${p.prev ? `Earlier book #${p.book.seriesNo}: ` : "The book being read now: "}${p.book.title}\n`;
+      for (const u of p.units) { const s = sums.get(sumKey(p.id, u, p.c)); if (s && s !== "FRONT MATTER") material += `\n### ${u.title}\n${s}\n`; }
+    }
+    const liveText = cur.live.map(u => textOfPages(cur.c, u.a, u.b)).join("\n\n").slice(-60000);
+    material += `\n\n# The chapter the reader is in now, up to the end of their current page\n<text>\n${liveText}\n</text>`;
+    const missingNote = plan.missing ? `This is book ${cur.book.seriesNo} of its series, and ${plan.missing} earlier book${plan.missing > 1 ? "s aren't" : " isn't"} in the material. Only if you reliably know this series, add a short recap of ${plan.missing > 1 ? "those books" : "that book"} from general knowledge, clearly labeled as such. Never use outside knowledge about this book or anything after it.` : "Use only the material given.";
+    RECAP.status = "Writing your recap…"; paintRecap();
+    const stream = client.beta.messages.stream({
+      model: RECAP_MODEL, max_tokens: 8000, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default",
+      output_config: { effort: "medium" },
+      system: `You write a "previously on" recap for someone returning to a book. Strict rule: the reader must not learn anything that happens after their current position. Use only the material provided; ${missingNote}
+Write it so it's easy to pick the story back up: a short section per earlier book (if any), then "So far in this book", then "Where you left off", which covers the last few pages in a bit more detail. Use ## headings and short paragraphs or bullets. Mention who people are when they come up. About 400 to 900 words.`,
+      messages: [{ role: "user", content: `Reader's position: ${cur.book.title}, page ${S.page} of ${cur.c.pages.length}.\n${material}` }],
+    });
+    for await (const ev of stream) {
+      if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") { RECAP.text += ev.delta.text; paintRecap(); }
+    }
+    const final = await stream.finalMessage();
+    if (final.stop_reason === "refusal") throw new Error("The recap couldn't be written for this book.");
+    RECAP.page = S.page; RECAP.status = "";
+    await idb.put("__recap_" + id, { text: RECAP.text, page: S.page, at: Date.now() });
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    RECAP.status = /401|authentication|api.key|x-api-key/i.test(msg) ? "That API key didn't work. Check it in Settings." : /429|rate/i.test(msg) ? "Anthropic is busy (rate limit). Try again in a minute." : /credit|billing|402/i.test(msg) ? "Your Anthropic account needs credit for this." : "Couldn't make the recap: " + msg;
+  } finally { RECAP.busy = false; paintRecap(); }
+}
+function mdLite(s){   // headings, bullets and bold, safely
+  return esc(s).split(/\n{2,}/).map(par => {
+    if (/^##\s/.test(par)) return `<h4>${par.replace(/^##+\s*/, "")}</h4>`;
+    if (/^[-*]\s/m.test(par)) return `<ul>${par.split(/\n/).filter(l => l.trim()).map(l => `<li>${l.replace(/^[-*]\s*/, "")}</li>`).join("")}</ul>`;
+    return `<p>${par.replace(/\n/g, "<br>")}</p>`;
+  }).join("").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+}
+function paintRecap(){ const el = $("#recapOut"); if (el) el.innerHTML = (RECAP.status ? `<p class="note">${esc(RECAP.status)}</p>` : "") + mdLite(RECAP.text); const b = $("#recapGo"); if (b) b.disabled = RECAP.busy; }
+
+/* ---------- the book sheet: Contents · Search · Notes · Words · People · Recap ---------- */
+async function renderBookSheet(el){
+  const c = S.content[S.cur], b = S.books[S.cur], tab = S.bookTab || "toc", text = c && c.kind === "text";
+  const tabs = [["toc", "Contents"], ...(text ? [["search", "Search"]] : []), ["notes", "Notes"], ["words", "Words"], ...(text ? [["people", "People"], ["recap", "Recap"]] : [])];
+  let body = "";
+  if (tab === "toc") {
+    let items = "";
+    if (text) { const curIdx = c.toc.reduce((acc, t, i) => t.page <= S.page ? i : acc, 0); items = c.toc.map((t, i) => `<li><button data-p="${t.page}" class="${i === curIdx ? "cur" : ""}"><span>${esc(t.title)}</span><span>${t.page}</span></button></li>`).join(""); }
+    else if (c) { const T = c.total, step = Math.max(1, Math.ceil(T / 30)); for (let p = 1; p <= T; p += step) items += `<li><button data-p="${p}"><span>Page ${p}</span><span>${Math.round((p - 1) / Math.max(1, T - 1) * 100)}%</span></button></li>`; }
+    body = `<ul class="toc">${items || "<li class='note'>Nothing here yet.</li>"}</ul>`;
+  } else if (tab === "search") {
+    const res = searchBook(c, S.findQ || ""), synced = syncPoints(b, textIndex(c)).length > 0;
+    body = `<input id="findIn" type="search" placeholder="Search this book" value="${esc(S.findQ || "")}" style="width:100%;box-sizing:border-box">
+      <p class="note">${S.findQ && S.findQ.trim().length > 1 ? `${res.length >= 300 ? "300+" : res.length} result${res.length === 1 ? "" : "s"}${synced && res.length ? " · ▶ plays the audiobook from there" : ""}` : "Type a word or name."}</p>
+      <ul class="toc">${res.slice(0, 200).map((r, i) => `<li><button data-hit="${i}"><span class="snip">${esc(r.snip)}</span><span>${r.page}</span></button>${synced ? `<button class="ib" data-play="${i}" aria-label="Play from here">${ICON.play}</button>` : ""}</li>`).join("")}</ul>`;
+    S._hits = res;
+  } else if (tab === "notes") {
+    const ms = liveMarks(b).sort((x, y) => (x.s || 0) - (y.s || 0) || x.p - y.p);
+    body = ms.length ? `<div class="row-btns" style="margin:0 0 8px"><button class="btn" id="nCopy">Copy all</button><button class="btn" id="nSave">Save as text file</button></div>
+      <ul class="marks">${ms.map(m => `<li><button data-m="${esc(m.id)}"><span class="mk mk-${m.k === "bm" ? "bm" : esc(m.c || "yellow")}"></span><span class="mt">${m.k === "bm" ? `<b>Bookmark</b> ${esc((m.t || "").slice(0, 90))}` : esc((m.t || "").slice(0, 220))}${m.n ? `<br><i>${esc(m.n)}</i>` : ""}</span><span>${m.p}</span></button><button class="ib" data-mdel="${esc(m.id)}" aria-label="Delete">${ICON.close}</button></li>`).join("")}</ul>`
+      : `<p class="note">Select text to highlight it or add a note. Tap the bookmark at the top to mark a page.</p>`;
+  } else if (tab === "words") {
+    const vs = Object.values(b.vocab || {}).filter(v => !v.del).sort((x, y) => y.at - x.at);
+    body = vs.length ? `<ul class="marks">${vs.map(v => `<li><button data-vw="${esc(v.w)}"><span class="mt"><b>${esc(v.w)}</b> — ${esc(v.d || "")}</span><span>${v.p || ""}</span></button><button class="ib" data-vdel="${esc(v.w)}" aria-label="Remove">${ICON.close}</button></li>`).join("")}</ul>`
+      : `<p class="note">Select a word and tap <b>Define</b>. Words you save show up here.</p>`;
+  } else if (tab === "people") {
+    const list = namesSoFar(c, S.page), open = S.personOpen && list.find(x => x.name === S.personOpen);
+    body = open ? `<button class="btn ghost" id="pBack">← All names</button><h4 style="margin:8px 0">${esc(open.name)} · ${open.n} mention${open.n > 1 ? "s" : ""} so far</h4>
+      <p class="note">Most recent first.</p><ul class="toc">${open.hits.slice(-40).reverse().map(pos => { const pg = pageOfPos(c, pos), t = pageTexts(c)[pg - 1], i = pos - textIndex(c).starts[pg - 1]; return `<li><button data-pos="${pos}" data-len="${open.name.length}"><span class="snip">${esc(t.slice(Math.max(0, i - 50), i + 80))}</span><span>${pg}</span></button></li>`; }).join("")}</ul>`
+      : `<p class="note">Names that have come up so far, most mentioned first. Nothing past your page, so no spoilers.</p><div class="people">${list.map(x => `<button class="chip" data-person="${esc(x.name)}">${esc(x.name)} <span class="note">${x.n}</span></button>`).join("") || `<p class="note">None yet.</p>`}</div>`;
+  } else if (tab === "recap") {
+    const saved = await idb.get("__recap_" + S.cur);
+    if (!RECAP.busy && saved && !RECAP.text) { RECAP.text = saved.text; RECAP.page = saved.page; }
+    if (!prefs.get("claudeKey")) body = `<p>A recap of everything that's happened so far, in this book and the earlier books of its series, without anything past your page.</p><p class="note">It uses Claude, with your own Anthropic API key. Add it in <b>Settings → AI recaps</b>.</p><button class="btn primary" id="toKey">Open Settings</button>`;
+    else {
+      const plan = await recapPlan(S.cur);
+      const before = plan.parts ? plan.parts.filter(p => p.prev).map(p => `#${p.book.seriesNo} ${p.book.title}`) : [];
+      body = plan.err ? `<p class="note">${esc(plan.err)}</p>` : `<p class="note">Covers ${before.length ? `${esc(before.join(", "))}, and ` : ""}this book up to page ${S.page}.${plan.missing ? ` ${plan.missing} earlier book${plan.missing > 1 ? "s aren't" : " isn't"} in your library, so ${plan.missing > 1 ? "they're" : "it's"} recapped from Claude's general knowledge.` : ""}${b.seriesNo == null ? " For a series, set its collection and number from the book's … menu." : ""}
+        ${plan.newChars > 20000 ? `<br>First time reads ${Math.round(plan.newChars / 1800)} pages (about $${plan.cost.toFixed(2)} on your Anthropic account); later recaps reuse that and cost a few cents.` : ""}</p>
+        <button class="btn primary" id="recapGo" ${RECAP.busy ? "disabled" : ""}>${RECAP.text && !RECAP.busy ? `Update recap${RECAP.page && RECAP.page !== S.page ? ` (last: page ${RECAP.page})` : ""}` : "Make recap"}</button>
+        <div class="recap" id="recapOut"></div>`;
+    }
+  }
+  el.innerHTML = `<div class="sheet"><h3><span class="btabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" data-btab="${k}" aria-selected="${tab === k}">${l}</button>`).join("")}</span><button class="ib" data-close aria-label="Close">${ICON.close}</button></h3>${body}</div>`;
+  el.querySelectorAll("[data-btab]").forEach(x => x.onclick = () => { S.bookTab = x.dataset.btab; S.personOpen = null; renderSheet(); });
+  el.querySelectorAll("[data-p]").forEach(x => x.onclick = () => { S.sheet = null; renderSheet(); goto(+x.dataset.p); });
+  const fi = $("#findIn"); if (fi) { fi.oninput = () => { clearTimeout(fi.t); fi.t = setTimeout(() => { S.findQ = fi.value; renderSheet(); const n = $("#findIn"); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 300); }; if (!S.findQ) fi.focus(); }
+  el.querySelectorAll("[data-hit]").forEach(x => x.onclick = () => { const r = S._hits[+x.dataset.hit]; jumpTo(r.s, r.e - r.s); });
+  el.querySelectorAll("[data-play]").forEach(x => x.onclick = async () => { const r = S._hits[+x.dataset.play]; await jumpTo(r.s, r.e - r.s); playFromPos(r.s); });
+  el.querySelectorAll("[data-m]").forEach(x => x.onclick = () => { const m = liveMarks(b).find(y => y.id === x.dataset.m); if (!m) return; if (m.k === "bm" && !text) { S.sheet = null; renderSheet(); goto(m.p); } else jumpTo(m.s, m.k === "bm" ? 0 : m.e - m.s); });
+  el.querySelectorAll("[data-mdel]").forEach(x => x.onclick = () => delMark(S.cur, x.dataset.mdel));
+  const nc = $("#nCopy"); if (nc) nc.onclick = () => navigator.clipboard.writeText(exportNotes(S.cur)).then(() => toast("Copied all notes."), () => toast("Couldn't copy."));
+  const ns = $("#nSave"); if (ns) ns.onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([exportNotes(S.cur)], { type: "text/plain" })); a.download = (b.title || "notes").replace(/[\\/:*?"<>|]/g, "") + " - notes.txt"; document.body.append(a); a.click(); a.remove(); };
+  el.querySelectorAll("[data-vw]").forEach(x => x.onclick = () => defineWord(x.dataset.vw));
+  el.querySelectorAll("[data-vdel]").forEach(x => x.onclick = () => { const vocab = { ...(b.vocab || {}) }; vocab[x.dataset.vdel] = { ...(vocab[x.dataset.vdel] || {}), del: 1, at: Date.now() }; save(S.cur, { vocab }); renderSheet(); });
+  el.querySelectorAll("[data-person]").forEach(x => x.onclick = () => { S.personOpen = x.dataset.person; renderSheet(); });
+  const pb = $("#pBack"); if (pb) pb.onclick = () => { S.personOpen = null; renderSheet(); };
+  el.querySelectorAll("[data-pos]").forEach(x => x.onclick = () => jumpTo(+x.dataset.pos, +x.dataset.len));
+  const tk = $("#toKey"); if (tk) tk.onclick = () => { closeReader(); S.view = "settings"; render(); };
+  const rg = $("#recapGo"); if (rg) rg.onclick = () => makeRecap(S.cur);
+  if (tab === "recap") paintRecap();
+  el.querySelector("[data-close]").onclick = () => toggleSheet(S.sheet);
 }
 
 /* ---------- file inputs ---------- */

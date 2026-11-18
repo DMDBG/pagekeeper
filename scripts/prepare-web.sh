@@ -8,6 +8,16 @@ fetch() { curl -fsSL --retry 3 -o "web/vendor/$2" "$1"; echo "fetched $2"; }
 fetch "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"          jszip.min.js
 fetch "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"         pdf.min.js
 fetch "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"  pdf.worker.min.js
+# The official Claude SDK, bundled into one file the reader page can load (for AI recaps).
+tmp=$(mktemp -d)
+(
+  cd "$tmp"
+  npm init -y > /dev/null
+  npm install --silent --no-audit --no-fund @anthropic-ai/sdk@1.10.0 esbuild@0.24.2 > /dev/null
+  echo 'export { default } from "@anthropic-ai/sdk";' > entry.js
+  npx esbuild entry.js --bundle --format=esm --platform=browser --minify --outfile=out.js --log-level=warning
+)
+cp "$tmp/out.js" web/vendor/anthropic-sdk.js && echo "bundled anthropic-sdk.js"
 node scripts/make-icon.js
 # Build stamp, shown in Settings so you can tell which version you're running.
 sha=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
