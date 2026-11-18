@@ -3455,12 +3455,19 @@ async function aiAsk(p, { system, user, maxTokens, effort, onWait }){
   for (let attempt = 0; ; attempt++) {
     const r = await aiHttp("POST", url, headers, JSON.stringify(payload));
     let j = null; try { j = JSON.parse(r.text); } catch {}
+    if (Array.isArray(j)) j = j[0];   // Google's OpenAI-style errors come wrapped in a list
+    // the service's own explanation, whatever shape it comes in
+    const said = String((j && (j.error && (j.error.message || (typeof j.error === "string" ? j.error : "")) || j.message || j.detail)) || r.text || "").replace(/\s+/g, " ").trim().slice(0, 280);
     if (r.status === 429 || r.status === 503) {
-      if (attempt >= 5) throw new Error(`${A.name} says you've reached its free limit for now. Try again later (daily limits reset overnight).`);
+      if (attempt >= 5) throw new Error(`${A.name} says you've reached its free limit for now. Try again later (daily limits reset overnight).${said ? ` (${said})` : ""}`);
       const wait = 20000 * (attempt + 1); onWait && onWait(Math.round(wait / 1000)); await aiWait(wait); continue;
     }
-    if (r.status === 401 || r.status === 403) throw new Error(`${A.name} didn't accept the key. Check it in Settings.`);
-    if (r.status >= 400) throw new Error(`${A.name}: ` + ((j && (j.error && (j.error.message || j.error) || j.message)) || `error ${r.status}`));
+    if (r.status === 402) throw new Error(p === "gemini"
+      ? `Google says payment is needed (402). This usually means the Google project your key belongs to has billing turned on with no credit, so Google charges every request instead of using the free tier. Fix: in AI Studio (aistudio.google.com/apikey), choose Create API key → in a new project (one without billing), paste that key here, and use a Flash model.${said ? ` Google said: ${said}` : ""}`
+      : `${A.name} says payment is needed (402): this model or your account isn't free.${said ? ` It said: ${said}` : ""}`);
+    if (r.status === 401 || r.status === 403) throw new Error(`${A.name} didn't accept the key (${r.status}). Check it in Settings.${said ? ` It said: ${said}` : ""}`);
+    if (r.status === 404) throw new Error(`${A.name} doesn't know the model “${model}”. Load the list in Settings and pick another.${said ? ` (${said})` : ""}`);
+    if (r.status >= 400) throw new Error(`${A.name} (error ${r.status}): ${said || "no details"}`);
     const text = local ? j && j.message && j.message.content : j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
     if (typeof text !== "string") throw new Error(`${A.name} sent back an answer Pagekeeper couldn't read.`);
     return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();   // some local models write their reasoning first
@@ -3565,7 +3572,7 @@ function bindAiSettings(el){
   const te = $("#aiTest"); if (te) te.onclick = async () => {
     te.disabled = true; te.textContent = "Testing…";
     try { const a = await aiAsk(p, { system: "Reply with one short friendly sentence.", user: "Say hello to a reader in under 12 words.", maxTokens: 60, effort: "low" }); toast(`${esc(AI[p].name)} works: “${esc(a.slice(0, 120))}”`, null, 7000); }
-    catch (e) { toast(esc(String(e.message || e)), null, 9000); }
+    catch (e) { toast(esc(String(e.message || e)), null, 20000); }
     te.disabled = false; te.textContent = "Test it";
   };
 }
@@ -3616,7 +3623,10 @@ Write it so it's easy to pick the story back up: a short section per earlier boo
     await idb.put("__recap_" + id, { text: RECAP.text, page: S.page, at: Date.now(), by: A.name });
   } catch (e) {
     const msg = String((e && e.message) || e);
-    RECAP.status = /401|authentication|x-api-key|invalid api key/i.test(msg) ? "That API key didn't work. Check it in Settings." : /credit|billing|402/i.test(msg) ? "Your account with this AI service needs credit." : msg.length < 300 ? "Couldn't make the recap: " + msg : "Couldn't make the recap.";
+    // the services' own messages are kept (they say what's wrong); Claude's SDK errors get a plain version
+    RECAP.status = aiPick() === "claude" && /401|authentication|x-api-key|invalid api key/i.test(msg) ? "That API key didn't work. Check it in Settings."
+      : aiPick() === "claude" && /credit|billing|402/i.test(msg) ? "Your Anthropic account needs credit for this."
+      : "Couldn't make the recap: " + msg.slice(0, 700);
   } finally { RECAP.busy = false; paintRecap(); }
 }
 function mdLite(s){   // headings, bullets and bold, safely
