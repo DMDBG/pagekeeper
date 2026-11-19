@@ -1,6 +1,6 @@
 // Keeps the PC/web version working offline. The iPhone app doesn't need this: its files are built in.
-const CACHE = "pagekeeper-v1";
-const SHELL = ["./", "index.html", "app.js", "config.js", "manifest.webmanifest",
+const CACHE = "pagekeeper-v2";
+const SHELL = ["./", "index.html", "pagecap.js", "app.js", "config.js", "manifest.webmanifest",
   "vendor/jszip.min.js", "vendor/pdf.min.js", "vendor/pdf.worker.min.js",
   "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png"];
 

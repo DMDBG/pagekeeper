@@ -267,6 +267,27 @@ async fn pk_caption(app: AppHandle, show: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Resizes the pop-out (the whole-page sizes), keeping it on its screen.
+#[tauri::command]
+fn pk_caption_size(app: AppHandle, w: f64, h: f64) -> Result<(), String> {
+    let win = app.get_webview_window("caption").ok_or("The pop-out isn't open.")?;
+    let (mut w, mut h) = (w, h);
+    if let Ok(Some(m)) = win.current_monitor() {
+        let s = m.scale_factor();
+        let (mw, mh) = (m.size().width as f64 / s, m.size().height as f64 / s);
+        w = w.min(mw * 0.95);
+        h = h.min(mh * 0.88);
+        let mp = m.position().to_logical::<f64>(s);
+        if let Ok(p) = win.outer_position() {
+            let p = p.to_logical::<f64>(s);
+            let x = p.x.min(mp.x + mw - w).max(mp.x);
+            let y = p.y.min(mp.y + mh - h - 40.0).max(mp.y);
+            let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        }
+    }
+    win.set_size(tauri::LogicalSize::new(w, h)).map_err(|e| e.to_string())
+}
+
 /// The play/pause key, working even while another app is in front. None turns it off.
 #[tauri::command]
 fn pk_hotkey(app: AppHandle, keys: Option<String>) -> Result<(), String> {
@@ -301,7 +322,7 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption, pk_hotkey,
+        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption, pk_caption_size, pk_hotkey,
             sync::pk_sync_status, sync::pk_sync_stop, sync::pk_sync_model, sync::pk_put_begin, sync::pk_put_chunk, sync::pk_transcribe, sync::pk_check, sync::pk_sync_release,
             share::pk_share_start, share::pk_share_stop, share::pk_share_has, share::pk_share_begin, share::pk_share_chunk, share::pk_share_list, update::pk_install_update, ai::pk_http])
         .run(tauri::generate_context!())

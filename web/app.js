@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "ai-14", items: [
+const WHATS_NEW = { id: "page-1", items: [
+  "<b>Pop out the whole page:</b> under <b>Aa → Pop-out shows</b>, pick <b>The whole page</b> and a size (Phone, Tablet, Book page or Wide). Words are gray until they're read, then come into color. Double-click a word (double-tap on iPhone) to move the audiobook or read-aloud to it. Its top bar has play, skip, page turns and text size.",
   "<b>Choose the AI for recaps</b> in Settings → AI recaps: Claude, or free options (Google Gemini, Groq, OpenRouter, Mistral), or Ollama running on your PC with no key at all.",
   "<b>Highlights, notes and bookmarks:</b> select text to highlight it, add a note or look a word up. The bookmark button marks a page. Everything is under <b>Contents → Notes</b>, syncs to your other devices, and can be copied or saved as a file.",
   "<b>Search, People and Recap</b> are under Contents too. Search plays the audiobook from a result; People lists the names so far, never past your page; Recap (with your Anthropic API key) tells you what's happened in the series up to your page.",
@@ -1397,6 +1398,11 @@ function renderSheet(){
       <div class="field"><label>Pop-out text</label>
         <div class="seg"><button id="capToggle" aria-pressed="${capOn}">${capOn ? "Hide pop-out" : "Show pop-out"}</button></div>
         <span class="note">${TAURI ? "Floats on top of everything on your screen. Drag it anywhere; drag its edges to resize." : "Floats over Pagekeeper. Drag it around; drag its corner to resize."} It shows the sentence being read aloud, or the page you're on.</span></div>
+      <div class="field"><label>Pop-out shows</label>
+        <div class="seg"><button data-capmode="line" aria-pressed="${capMode() === "line"}">One sentence</button><button data-capmode="page" aria-pressed="${capMode() === "page"}">The whole page</button></div>
+        ${capMode() === "page" ? `<div class="seg" style="margin-top:8px">${Object.entries(CAP_SIZES).map(([k, [, , l]]) => `<button data-capsize="${k}" aria-pressed="${(prefs.get("capPSz") || "tablet") === k}">${l}</button>`).join("")}</div>
+        <div class="seg" style="margin-top:8px"><button data-capx="gray" aria-pressed="${prefs.get("capGray") !== false}">Gray until it's read</button></div>` : ""}
+        <span class="note">The whole page: words are gray until they're read, then come into color. ${TAURI ? "Double-click" : "Double-tap"} a word to move the audiobook or read-aloud to it. Drag it by its top bar${TAURI ? ", and drag its edges to resize" : ""}. For audiobooks, turn on Follow in the player.</span></div>
       <div class="field"><label>Pop-out style</label>
         <div class="seg">
           <button data-capstyle="clear" aria-pressed="${clear}">Just text</button>
@@ -1424,6 +1430,8 @@ function renderSheet(){
         </div>
         <span class="note">Locked, ${TAURI ? "clicks" : "taps"} go straight through the pop-out to whatever is under it. Hide when paused shows it only while the audiobook or read-aloud is playing. You can also ${TAURI ? "right-click" : "press and hold"} the pop-out for these.</span></div>`);
     el.querySelectorAll("[data-capx]").forEach(b => b.onclick = () => { capCmd(b.dataset.capx); renderSheet(); });
+    el.querySelectorAll("[data-capmode]").forEach(b => b.onclick = () => { if (!prefs.get("capOn")) setCaption(true); setCapMode(b.dataset.capmode); });
+    el.querySelectorAll("[data-capsize]").forEach(b => b.onclick = () => { if (!prefs.get("capOn")) setCaption(true); capCmd("size-" + b.dataset.capsize); });
     $("#capToggle").onclick = () => { setCaption(!prefs.get("capOn")); const rp = $("#rPop"); if (rp) rp.setAttribute("aria-pressed", !!prefs.get("capOn")); renderSheet(); };
     el.querySelectorAll("[data-capstyle]").forEach(b => b.onclick = () => { prefs.set("capStyle", b.dataset.capstyle); capSend(); renderSheet(); });
     const ca = $("#capAuto"); if (ca) ca.onclick = () => { prefs.set("capAuto", !capCfg().auto); capSend(); renderSheet(); };
@@ -1824,7 +1832,7 @@ function ttsSpeakPage(run, items){
         el.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
       }
       const lead = text.length - text.trimStart().length;
-      capNow.speaking = true; capNow.text = text.trim(); capNow.book = S.cur; capNow.page = S.page; capNow.word = null; capSend();
+      capNow.speaking = true; capNow.text = text.trim(); capNow.book = S.cur; capNow.page = S.page; capNow.word = null; capNow.ttsEl = el; capNow.lead = lead; capSend();
       const u = makeUtterance(text.trim());
       let finished = false;
       const after = advance => {
@@ -2437,9 +2445,10 @@ async function followTick(force){
   if (page !== S.page) { fLast.busy = true; try { await goto(page, false, "follow"); } finally { fLast.busy = false; } }
   if (!ix.starts) return;
   if (fLast.page !== S.page) { fLast.page = S.page; fLast.el = null; }
+  capNow.abook = S.cur; capNow.apage = S.page; capNow.apos = Math.max(0, Math.round(inPage));
   let n = 0, hit = null;
   for (const sp of document.querySelectorAll(".page [data-s]")) { n += sp.textContent.length; hit = sp; if (n > inPage) break; }
-  if (!hit || hit === fLast.el) return;
+  if (!hit || hit === fLast.el) { if (capMode() === "page") capSend(); return; }
   if (fLast.el) clearHighlight(fLast.el);
   fLast.el = hit;
   if ((prefs.get("hl") || "sentence") !== "off") {
@@ -2919,7 +2928,85 @@ function capPayload(){
     else if (c && c.kind === "pdf") hint = "Pop-out text works with EPUB and text books, or while a PDF is read aloud.";
   } else hint = "Open a book in Pagekeeper.";
   const playing = capNow.speaking || !!(auBook && !au.paused);
-  return { ...capCfg(), text, hint, info: capInfo(), locked: !!prefs.get("capLock"), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
+  const page = capMode() === "page";
+  return { ...capCfg(), ...(page ? { size: prefs.get("capPSize") || 19, mode: "page", pg: capPage(), gray: prefs.get("capGray") !== false, canRead: S.view === "reader" && !!S.cur } : { mode: "line" }), text, hint, info: capInfo(), locked: !!prefs.get("capLock"), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
+}
+/* The whole page in the pop-out: its sentences, and how far into the page the audio or read-aloud is
+   (-1: not known, so it's all in color). */
+const capMode = () => prefs.get("capMode") === "page" ? "page" : "line";
+const CAP_SIZES = { phone: [390, 720, "Phone"], tablet: [640, 860, "Tablet"], book: [540, 760, "Book page"], wide: [940, 560, "Wide"] };
+function capPage(){
+  if (S.view !== "reader" || !S.cur) return null;
+  const c = S.content[S.cur]; if (!c || c.kind !== "text") return null;
+  const blocks = (c.pages[S.page - 1] || []).map(([t, x]) => [t === "h" ? 1 : 0, t === "h" ? [x] : splitS(x)]);
+  const total = blocks.reduce((a, [, ss]) => a + ss.reduce((n, q) => n + q.length, 0), 0);
+  let pos = -1;
+  const audioHere = capNow.abook === S.cur && capNow.apage && auBook && auBook.id === S.cur;
+  if (audioHere && (!au.paused || !capNow.speaking)) pos = capNow.apage === S.page ? Math.min(total, capNow.apos) : capNow.apage > S.page ? total : 0;
+  else if (capNow.speaking && capNow.ttsEl && capNow.ttsEl.isConnected && capNow.book === S.cur && capNow.page === S.page) {
+    let n = 0; for (const sp of pageSpans()) { if (sp === capNow.ttsEl) break; n += sp.textContent.length; }
+    pos = n + (capNow.lead || 0) + (capNow.word ? capNow.word[0] + capNow.word[1] : 0);
+  }
+  return { key: S.cur + "|" + S.page, blocks, pos, total, page: S.page, pages: c.pages.length };
+}
+function capResize(w, h){
+  if (TAURI) { TAURI.core.invoke("pk_caption_size", { w, h }).catch(() => {}); return; }
+  const f = $("#floatcap"); if (!f) return;
+  w = Math.min(w, innerWidth - 16); h = Math.min(h, innerHeight - 24);
+  f.style.width = w + "px"; f.style.height = h + "px";
+  const r = f.getBoundingClientRect();
+  f.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left)) + "px"; f.style.top = Math.max(8, Math.min(innerHeight - h - 8, r.top)) + "px";
+  prefs.set("capPos", { x: parseInt(f.style.left), y: parseInt(f.style.top) }); prefs.set("capBox", { w, h });
+}
+function setCapMode(m){
+  prefs.set("capMode", m); capSend();
+  if (m === "page") capResize(...CAP_SIZES[prefs.get("capPSz") || "tablet"]); else capResize(TAURI ? 560 : 520, TAURI ? 150 : 130);
+  if (S.sheet === "type") renderSheet();
+}
+// Turn the page from the pop-out (the audio keeps going where it is).
+async function capTurn(d){
+  if (S.view !== "reader" || !S.cur) return;
+  if (S.reading && playerMode() === "tts") { ttsGotoPage(d); return; }
+  if (followActive()) { S.followHold = true; updateFollowPill(); }
+  await goto(S.page + d);
+}
+// Where in the audiobook a place in the text is read: the exact reverse of how follow-along maps the audio to the text.
+function audioAtPos(b, c, pos){
+  const ix = textIndex(c), f = pos / ix.total;
+  const { off, total } = audioClock(b); if (!total) return null;
+  const g = (ti, t) => (off[ti] ?? off[off.length - 1]) + t;
+  const manual = ((b.follow && b.follow.pts) || []).map(([ti, t, fr]) => [g(ti, t), fr]);
+  const auto = syncPoints(b, ix).map(([ti, t, fr]) => [g(ti, t), fr]).filter(([a, fr]) => manual.every(([ma, mf]) => Math.abs(a - ma) > 30 && (a < ma ? fr <= mf : fr >= mf)));
+  let P = (auto.length ? auto.concat(manual) : manual).sort((x, y) => x[0] - y[0]);
+  if (auto.length < 2) P = [[0, 0], ...P.filter(p => p[0] > 0 && p[0] < total), [total, 1]];
+  const A = P[0], Z = P[P.length - 1], rate = (Z[0] - A[0]) / Math.max(1e-9, Z[1] - A[1]);
+  let at;
+  if (f <= A[1]) at = A[0] - (A[1] - f) * rate;
+  else if (f >= Z[1]) at = Z[0] + (f - Z[1]) * rate;
+  else { let i = 0; while (i < P.length - 2 && P[i + 1][1] <= f) i++; const [a0, f0] = P[i], [a1, f1] = P[i + 1]; at = a0 + (f1 > f0 ? (f - f0) / (f1 - f0) : 0) * (a1 - a0); }
+  at = Math.max(0, Math.min(total - 0.5, at - 0.15));
+  let ti = 0; while (ti < off.length - 2 && off[ti + 1] <= at) ti++;
+  return { ti, t: at - off[ti] };
+}
+// Double-clicked a word in the whole-page pop-out: move the audiobook (or read-aloud) there.
+async function capSeek(a){
+  const c = S.content[S.cur], b = S.books[S.cur];
+  if (S.view !== "reader" || !c || c.kind !== "text" || a.key !== S.cur + "|" + S.page) return;
+  const off = Math.max(0, +a.off || 0), pos = textIndex(c).starts[S.page - 1] + off;
+  if (b?.audio?.tracks?.length && playerMode() !== "tts") {
+    const at = audioAtPos(b, c, pos); if (!at) return;
+    S.followHold = false; updateFollowPill();
+    if (await loadTrack(at.ti, at.t)) {
+      capNow.abook = S.cur; capNow.apage = S.page; capNow.apos = off;
+      au.play().catch(() => {}); S.dock = true; updateDock(); followTick(true); capSend();
+      if (!followOn()) toast("Turn on Follow in the player so the page colors in as it plays.");
+    }
+    return;
+  }
+  // Read aloud: start from the sentence with that word.
+  let n = 0, i = -1;
+  for (const sp of pageSpans()) { const t = sp.textContent; if (t.trim()) i++; if (n + t.length > off) break; n += t.length; }
+  ttsJumpTo(Math.max(0, i));
 }
 // "Chapter 12 · 3 h 10 min left" under the pop-out text.
 function chapterAt(c, page){
@@ -2947,20 +3034,35 @@ function capSend(){
 }
 function setCaption(on){
   prefs.set("capOn", !!on);
-  if (TAURI) TAURI.core.invoke("pk_caption", { show: !!on }).catch(e => toast("Couldn't open the pop-out: " + esc(String(e))));
+  if (TAURI) TAURI.core.invoke("pk_caption", { show: !!on }).then(() => { if (on && capMode() === "page") capResize(...CAP_SIZES[prefs.get("capPSz") || "tablet"]); }).catch(e => toast("Couldn't open the pop-out: " + esc(String(e))));
   else if (!on) { const f = $("#floatcap"); if (f) f.remove(); }
   capSend();
 }
 if (TAURI && TAURI.event) {
   TAURI.event.listen("pk-caption-ready", () => capSend());
   TAURI.event.listen("pk-caption-closed", () => { if (prefs.get("capOn")) { prefs.set("capOn", false); if (S.sheet === "type") renderSheet(); } });
-  TAURI.event.listen("pk-caption-cmd", e => capCmd(e.payload && e.payload.cmd));
+  TAURI.event.listen("pk-caption-cmd", e => capCmd(e.payload && e.payload.cmd, e.payload || {}));
 }
 // The pop-out's right-click menu (on iPhone, press and hold the panel).
-function capCmd(cmd){
+function capCmd(cmd, a = {}){
+    if (!cmd) return;
     if (cmd === "close") { setCaption(false); if (S.sheet === "type") renderSheet(); return; }
     if (cmd === "play") { playPauseAny(); return; }
-    if (cmd === "back") { if (auBook) skipBy(-skipSec()); return; }
+    if (cmd === "back") { if (auBook) skipBy(-skipSec()); else if (S.reading) ttsJumpTo(TTS.idx - 1); return; }
+    if (cmd === "fwd") { if (auBook) skipBy(skipSec()); else if (S.reading) ttsJumpTo(TTS.idx + 1); return; }
+    if (cmd === "seek") { capSeek(a); return; }
+    if (cmd === "prevpage" || cmd === "nextpage") { capTurn(cmd === "nextpage" ? 1 : -1); return; }
+    if (cmd === "mode") { setCapMode(capMode() === "page" ? "line" : "page"); return; }
+    if (cmd.startsWith("size-")) {
+      const k = cmd.slice(5); if (!CAP_SIZES[k]) return;
+      prefs.set("capPSz", k);
+      if (capMode() !== "page") setCapMode("page"); else { capResize(...CAP_SIZES[k]); if (S.sheet === "type") renderSheet(); }
+      return;
+    }
+    if (cmd === "gray") { prefs.set("capGray", prefs.get("capGray") === false); capSend(); if (S.sheet === "type") renderSheet(); return; }
+    if ((cmd === "bigger" || cmd === "smaller") && capMode() === "page") {
+      prefs.set("capPSize", Math.max(12, Math.min(40, (prefs.get("capPSize") || 19) + (cmd === "bigger" ? 2 : -2)))); capSend(); return;
+    }
     if (cmd === "lock") {
       const on = !prefs.get("capLock"); prefs.set("capLock", on);
       if (on) toast(TAURI ? "Pop-out locked. Clicks go through it now. To unlock, open the player or Aa in Pagekeeper and tap Unlock pop-out." : "Pop-out locked. Taps go through it now. To unlock, tap Unlock pop-out in the player or under Aa.", null, 8000);
@@ -2977,7 +3079,9 @@ function capCmd(cmd){
 const capMenuItems = () => {
   const p = capPayload();
   return [p.audio || p.speaking ? ["play", p.playing ? "Pause" : "Play"] : null, p.audio ? ["back", "Back a few seconds"] : null,
-    ["bigger", "Bigger text"], ["smaller", "Smaller text"], ["style", p.style === "clear" ? "Show a background" : "Just the text"],
+    ["mode", p.mode === "page" ? "Show one sentence" : "Show the whole page"],
+    ...(p.mode === "page" ? [...Object.entries(CAP_SIZES).map(([k, [, , l]]) => ["size-" + k, (prefs.get("capPSz") || "tablet") === k ? "✓ " + l + " size" : l + " size"]), ["gray", (p.gray ? "✓ " : "") + "Gray until it's read"]] : []),
+    ["bigger", "Bigger text"], ["smaller", "Smaller text"], p.mode === "page" ? null : ["style", p.style === "clear" ? "Show a background" : "Just the text"],
     ["lock", (p.locked ? "✓ " : "") + "Lock in place (taps go through)"], ["autohide", (p.autohide ? "✓ " : "") + "Hide when paused"], ["info", (p.showInfo ? "✓ " : "") + "Show chapter and time left"],
     ["close", "Close pop-out"]].filter(Boolean);
 };
@@ -2998,18 +3102,29 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && $("#fcMenu
 /* In-app floating panel (iPhone and browser). */
 function renderFloatCap(p){
   let f = $("#floatcap");
+  const pageMode = p.mode === "page" && !!window.PKPage;
+  if (f && f.classList.contains("page") !== pageMode) { f.remove(); f = null; }
   if (!f) {
-    f = document.createElement("div"); f.id = "floatcap"; f.setAttribute("role", "status"); f.setAttribute("aria-live", "polite");
+    f = document.createElement("div"); f.id = "floatcap";
     const pos = prefs.get("capPos") || { x: 16, y: 90 };
     f.style.left = pos.x + "px"; f.style.top = pos.y + "px";
-    const sz = prefs.get("capBox"); if (sz) { f.style.width = sz.w + "px"; f.style.height = sz.h + "px"; }
-    f.innerHTML = `<div class="fc-text"></div><div class="fc-info"></div><span class="fc-grip" aria-hidden="true"></span>`;
+    const sz = prefs.get("capBox"); if (sz) { f.style.width = Math.min(sz.w, innerWidth - 16) + "px"; f.style.height = Math.min(sz.h, innerHeight - 24) + "px"; }
+    if (pageMode) {
+      f.classList.add("page");
+      f.innerHTML = `<span class="fc-grip" aria-hidden="true"></span>`;
+      f._pp = PKPage.mount(f, { onCmd: (c, a) => capCmd(c, a) });
+    } else {
+      f.setAttribute("role", "status"); f.setAttribute("aria-live", "polite");
+      f.innerHTML = `<div class="fc-text"></div><div class="fc-info"></div><span class="fc-grip" aria-hidden="true"></span>`;
+    }
     document.body.append(f);
     // drag anywhere on the panel; drag the corner to resize
     let drag = null, hold = 0;
     f.addEventListener("contextmenu", e => { e.preventDefault(); drag = null; floatCapMenu(e.clientX, e.clientY); });
     f.addEventListener("pointerdown", e => {
       if (e.button === 2) return;
+      // the whole page: drag by its top bar (or resize by the corner); the text scrolls and takes double-taps
+      if (f.classList.contains("page") && (!e.target.closest(".pp-bar, .fc-grip") || e.target.closest("button"))) return;
       clearTimeout(hold);
       if (e.pointerType !== "mouse") hold = setTimeout(() => { drag = null; floatCapMenu(e.clientX, e.clientY); }, 600);
       const r = f.getBoundingClientRect();
@@ -3037,10 +3152,11 @@ function renderFloatCap(p){
   }
   f.style.setProperty("--fg", p.fg); f.style.setProperty("--bg", p.bg); f.style.setProperty("--size", p.size + "px");
   f.classList.toggle("speaking", !!p.speaking);
-  f.classList.toggle("clear", p.style === "clear");
-  f.classList.toggle("auto", !!p.auto);
+  f.classList.toggle("clear", !pageMode && p.style === "clear");
+  f.classList.toggle("auto", !pageMode && !!p.auto);
   f.classList.toggle("locked", !!p.locked);
   f.classList.toggle("gone", !!p.hidden);
+  if (pageMode) { f._pp.update(p); return; }
   const inf = f.querySelector(".fc-info"); inf.textContent = p.info || ""; inf.hidden = !p.info;
   const box = f.querySelector(".fc-text");
   if (!p.text) box.innerHTML = `<span class="fc-hint">${esc(p.hint || "")}</span>`;

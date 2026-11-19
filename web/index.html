@@ -211,6 +211,9 @@ input.scrub:active::-webkit-slider-thumb{transform:scale(1.2)}
 #floatcap.locked{pointer-events:none;box-shadow:none}
 #floatcap.locked .fc-grip{display:none}
 #floatcap.gone{opacity:0;pointer-events:none;transition:opacity .4s 1s}
+/* the whole page in the floating panel */
+#floatcap.page{cursor:default;touch-action:auto;background:var(--bg,#111318)}
+#floatcap.page .fc-grip{z-index:2}
 #fcMenu{position:fixed;z-index:60;min-width:190px;padding:5px;display:flex;flex-direction:column;background:var(--surface);color:var(--ink);border:1px solid var(--line,#3A4150);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.35);font:14px var(--ui)}
 #fcMenu button{all:unset;padding:8px 12px;border-radius:6px;cursor:pointer}
 #fcMenu button:hover,#fcMenu button:focus-visible{background:color-mix(in srgb,currentColor 12%,transparent)}
@@ -305,6 +308,7 @@ blockquote.mq.hl-green{border-color:#3fbf68}blockquote.mq.hl-blue{border-color:#
 <input type="file" id="relinkFile" accept=".epub,.pdf,.txt" hidden>
 <script src="config.js"></script>
 <script src="version.js" onerror="void 0"></script>
+<script src="pagecap.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
