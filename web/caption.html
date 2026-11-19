@@ -35,6 +35,8 @@ body.clear mark{background:transparent;text-decoration:underline;text-decoration
 /* the whole page (pagecap.js): a solid page you drag by its top bar */
 #pg{display:none}
 body.pagemode{background:var(--bg)!important;cursor:default}
+body.pagemode.pclear{background:transparent!important}
+body.pagemode.pclear:hover{box-shadow:inset 0 0 0 1px rgba(127,127,127,.45)}
 body.pagemode #t,body.pagemode #info{display:none}
 body.pagemode #pg{display:block;position:fixed;inset:0}
 body.gone #pg{opacity:0;transition:opacity .4s 1s}
@@ -59,6 +61,7 @@ body.gone #pg{opacity:0;transition:opacity .4s 1s}
     if (page) {
       if (!pp) pp = PKPage.mount(document.getElementById("pg"), { onCmd: (c, a) => cmd(c, a), drag: true });
       document.body.classList.remove("clear", "solid");
+      document.body.classList.toggle("pclear", p.pclear === true);
       pp.update(p);
       document.body.classList.toggle("gone", !!p.hidden);
       document.body.classList.toggle("locked", !!p.locked);
@@ -96,7 +99,7 @@ body.gone #pg{opacity:0;transition:opacity .4s 1s}
     last.audio ? ["back", "Back a few seconds"] : null,
     null,
     ["mode", last.mode === "page" ? "Show one sentence" : "Show the whole page"],
-    ...(last.mode === "page" ? [["size-phone", "Phone size"], ["size-tablet", "Tablet size"], ["size-book", "Book page size"], ["size-wide", "Wide size"], ["gray", "Gray until it's read", last.gray !== false]] : []),
+    ...(last.mode === "page" ? [["size-phone", "Phone size"], ["size-tablet", "Tablet size"], ["size-book", "Book page size"], ["size-wide", "Wide size"], ["gray", "Gray until it's read", last.gray !== false], ["pclear", "No background", last.pclear === true]] : []),
     null,
     ["bigger", "Bigger text"],
     ["smaller", "Smaller text"],

@@ -214,6 +214,8 @@ input.scrub:active::-webkit-slider-thumb{transform:scale(1.2)}
 /* the whole page in the floating panel */
 #floatcap.page{cursor:default;touch-action:auto;background:var(--bg,#111318)}
 #floatcap.page .fc-grip{z-index:2}
+#floatcap.page.pclear{background:transparent;box-shadow:none}
+#floatcap.page.pclear:hover{outline:1px dashed color-mix(in srgb,currentColor 40%,transparent)}
 #fcMenu{position:fixed;z-index:60;min-width:190px;padding:5px;display:flex;flex-direction:column;background:var(--surface);color:var(--ink);border:1px solid var(--line,#3A4150);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.35);font:14px var(--ui)}
 #fcMenu button{all:unset;padding:8px 12px;border-radius:6px;cursor:pointer}
 #fcMenu button:hover,#fcMenu button:focus-visible{background:color-mix(in srgb,currentColor 12%,transparent)}

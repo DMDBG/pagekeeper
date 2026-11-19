@@ -1401,7 +1401,7 @@ function renderSheet(){
       <div class="field"><label>Pop-out shows</label>
         <div class="seg"><button data-capmode="line" aria-pressed="${capMode() === "line"}">One sentence</button><button data-capmode="page" aria-pressed="${capMode() === "page"}">The whole page</button></div>
         ${capMode() === "page" ? `<div class="seg" style="margin-top:8px">${Object.entries(CAP_SIZES).map(([k, [, , l]]) => `<button data-capsize="${k}" aria-pressed="${(prefs.get("capPSz") || "tablet") === k}">${l}</button>`).join("")}</div>
-        <div class="seg" style="margin-top:8px"><button data-capx="gray" aria-pressed="${prefs.get("capGray") !== false}">Gray until it's read</button></div>` : ""}
+        <div class="seg" style="margin-top:8px"><button data-capx="gray" aria-pressed="${prefs.get("capGray") !== false}">Gray until it's read</button><button data-capx="pclear" aria-pressed="${prefs.get("capPClear") === true}">No background</button></div>` : ""}
         <span class="note">The whole page: words are gray until they're read, then come into color. ${TAURI ? "Double-click" : "Double-tap"} a word to move the audiobook or read-aloud to it. Drag it by its top bar${TAURI ? ", and drag its edges to resize" : ""}. For audiobooks, turn on Follow in the player.</span></div>
       <div class="field"><label>Pop-out style</label>
         <div class="seg">
@@ -2929,7 +2929,7 @@ function capPayload(){
   } else hint = "Open a book in Pagekeeper.";
   const playing = capNow.speaking || !!(auBook && !au.paused);
   const page = capMode() === "page";
-  return { ...capCfg(), ...(page ? { size: prefs.get("capPSize") || 19, mode: "page", pg: capPage(), gray: prefs.get("capGray") !== false, canRead: S.view === "reader" && !!S.cur } : { mode: "line" }), text, hint, info: capInfo(), locked: !!prefs.get("capLock"), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
+  return { ...capCfg(), ...(page ? { size: prefs.get("capPSize") || 19, mode: "page", pg: capPage(), gray: prefs.get("capGray") !== false, pclear: prefs.get("capPClear") === true, canRead: S.view === "reader" && !!S.cur } : { mode: "line" }), text, hint, info: capInfo(), locked: !!prefs.get("capLock"), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
 }
 /* The whole page in the pop-out: its sentences, and how far into the page the audio or read-aloud is
    (-1: not known, so it's all in color). */
@@ -3059,6 +3059,7 @@ function capCmd(cmd, a = {}){
       if (capMode() !== "page") setCapMode("page"); else { capResize(...CAP_SIZES[k]); if (S.sheet === "type") renderSheet(); }
       return;
     }
+    if (cmd === "pclear") { prefs.set("capPClear", !prefs.get("capPClear")); capSend(); if (S.sheet === "type") renderSheet(); return; }
     if (cmd === "gray") { prefs.set("capGray", prefs.get("capGray") === false); capSend(); if (S.sheet === "type") renderSheet(); return; }
     if ((cmd === "bigger" || cmd === "smaller") && capMode() === "page") {
       prefs.set("capPSize", Math.max(12, Math.min(40, (prefs.get("capPSize") || 19) + (cmd === "bigger" ? 2 : -2)))); capSend(); return;
@@ -3080,7 +3081,7 @@ const capMenuItems = () => {
   const p = capPayload();
   return [p.audio || p.speaking ? ["play", p.playing ? "Pause" : "Play"] : null, p.audio ? ["back", "Back a few seconds"] : null,
     ["mode", p.mode === "page" ? "Show one sentence" : "Show the whole page"],
-    ...(p.mode === "page" ? [...Object.entries(CAP_SIZES).map(([k, [, , l]]) => ["size-" + k, (prefs.get("capPSz") || "tablet") === k ? "✓ " + l + " size" : l + " size"]), ["gray", (p.gray ? "✓ " : "") + "Gray until it's read"]] : []),
+    ...(p.mode === "page" ? [...Object.entries(CAP_SIZES).map(([k, [, , l]]) => ["size-" + k, (prefs.get("capPSz") || "tablet") === k ? "✓ " + l + " size" : l + " size"]), ["gray", (p.gray ? "✓ " : "") + "Gray until it's read"], ["pclear", (p.pclear ? "✓ " : "") + "No background"]] : []),
     ["bigger", "Bigger text"], ["smaller", "Smaller text"], p.mode === "page" ? null : ["style", p.style === "clear" ? "Show a background" : "Just the text"],
     ["lock", (p.locked ? "✓ " : "") + "Lock in place (taps go through)"], ["autohide", (p.autohide ? "✓ " : "") + "Hide when paused"], ["info", (p.showInfo ? "✓ " : "") + "Show chapter and time left"],
     ["close", "Close pop-out"]].filter(Boolean);
@@ -3156,6 +3157,7 @@ function renderFloatCap(p){
   f.classList.toggle("auto", !pageMode && !!p.auto);
   f.classList.toggle("locked", !!p.locked);
   f.classList.toggle("gone", !!p.hidden);
+  f.classList.toggle("pclear", pageMode && p.pclear === true);
   if (pageMode) { f._pp.update(p); return; }
   const inf = f.querySelector(".fc-info"); inf.textContent = p.info || ""; inf.hidden = !p.info;
   const box = f.querySelector(".fc-text");

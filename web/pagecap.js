@@ -17,6 +17,15 @@
 .pp-text .s{transition:color .25s}
 .pp.gray .pp-text .u{color:var(--dim)}
 .pp.gray .pp-text .s.cur .u{color:var(--mid)}
+/* No background: just the words on your screen, each letter outlined so it reads on light and dark */
+.pp.clear{background:transparent}
+.pp.clear .pp-bar{background:color-mix(in srgb,var(--bg) 70%,transparent);border:0;border-radius:10px;margin:2px}
+.pp.clear .pp-text{font-weight:600;scrollbar-width:none;--o:var(--bg);text-shadow:0 0 1px var(--o),1.5px 1.5px 0 var(--o),-1.5px -1.5px 0 var(--o),1.5px -1.5px 0 var(--o),-1.5px 1.5px 0 var(--o),0 1.5px 0 var(--o),0 -1.5px 0 var(--o),1.5px 0 0 var(--o),-1.5px 0 0 var(--o)}
+.pp.clear .pp-text::-webkit-scrollbar{display:none}
+.pp.clear.gray .pp-text .u{color:color-mix(in srgb,var(--fg) 40%,transparent)}
+.pp.clear.gray .pp-text .s.cur .u{color:color-mix(in srgb,var(--fg) 62%,transparent)}
+.pp.clear .pp-prog{background:transparent}
+.pp-bar button *{pointer-events:none}
 .pp:not(.gray) .pp-text .s.cur{background:color-mix(in srgb,var(--fg) 12%,transparent);border-radius:4px;-webkit-box-decoration-break:clone;box-decoration-break:clone}
 .pp-text .flash{background:color-mix(in srgb,var(--fg) 30%,transparent);border-radius:4px;transition:background .6s}
 .pp-text .hint{font:14px system-ui,-apple-system,"Segoe UI",sans-serif;opacity:.7}
@@ -160,8 +169,9 @@
       update(p){
         last = p.pg || {};
         root.classList.toggle("gray", p.gray !== false);
+        root.classList.toggle("clear", p.pclear === true);
         root.querySelector(".pp-title").textContent = [last.page ? `Page ${last.page}${last.pages ? " of " + last.pages : ""}` : "", p.info || ""].filter(Boolean).join(" · ");
-        const pb = bar.querySelector('[data-c="play"]'); pb.innerHTML = p.playing ? ICONS.pause : ICONS.play; pb.hidden = !(p.audio || p.canRead);
+        const pb = bar.querySelector('[data-c="play"]'); const pk = p.playing ? "pause" : "play"; if (pb.dataset.k !== pk) { pb.dataset.k = pk; pb.innerHTML = ICONS[pk]; pb.title = p.playing ? "Pause" : "Play"; } pb.hidden = !(p.audio || p.canRead);
         bar.querySelector('[data-c="back"]').hidden = bar.querySelector('[data-c="fwd"]').hidden = !(p.audio || p.speaking);
         if (!p.pg) { key = null; sents = []; text.innerHTML = `<p class="hint">${esc(p.hint || "Open an EPUB or text book in Pagekeeper to see its page here.")}</p>`; prog.style.width = "0"; return; }
         if (last.key !== key) { key = last.key; build(last); }
