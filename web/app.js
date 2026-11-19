@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "page-1", items: [
+const WHATS_NEW = { id: "pip-1", items: [
+  "<b>Float the text over other apps:</b> while a book plays on your iPhone, swipe up on the small player at the bottom. The page floats in a little window over your other apps, gray until it's read, then in color. Its play/pause button plays and pauses the book. In the full player it's <b>Float text over other apps</b>.",
   "<b>Pop out the whole page:</b> under <b>Aa → Pop-out shows</b>, pick <b>The whole page</b> and a size (Phone, Tablet, Book page or Wide). Words are gray until they're read, then come into color. Double-click a word (double-tap on iPhone) to move the audiobook or read-aloud to it. Its top bar has play, skip, page turns and text size.",
   "<b>Choose the AI for recaps</b> in Settings → AI recaps: Claude, or free options (Google Gemini, Groq, OpenRouter, Mistral), or Ollama running on your PC with no key at all.",
   "<b>Highlights, notes and bookmarks:</b> select text to highlight it, add a note or look a word up. The bookmark button marks a page. Everything is under <b>Contents → Notes</b>, syncs to your other devices, and can be copied or saved as a file.",
@@ -2150,7 +2151,7 @@ function updateDock(){
       <div class="chips">${SPEEDS.map(x => `<button class="chip" data-rate="${x}" aria-pressed="${x === r}">${rateTxt(x)}</button>`).join("")}</div>${label ? `<span class="note">${label}</span>` : ""}</div>`;
   const volRow = `<div class="pl-row"><label>Volume</label><button class="ib" id="auMute" aria-label="Mute">${ICON.vol}</button>
       <input type="range" class="scrub vol" id="auVol" min="0" max="1" step="0.01" value="${shownVol() == null ? 1 : shownVol()}" aria-label="Volume"></div>`;
-  const popRow = `<div class="pl-row"><label>Pop-out</label><button class="btn" id="plPop">${prefs.get("capOn") ? "Hide pop-out text" : "Show pop-out text"}</button>${prefs.get("capOn") && prefs.get("capLock") ? `<button class="btn primary" id="plUnlock">Unlock pop-out</button>` : ""}<span class="note">Right-click it for more. Colors and style under Aa.</span></div>`;
+  const popRow = `<div class="pl-row"><label>Pop-out</label>${pipSupported() ? `<button class="btn primary" id="plPip">${PIP.on ? "Stop floating text" : "Float text over other apps"}</button>` : ""}<button class="btn" id="plPop">${prefs.get("capOn") ? "Hide pop-out text" : "Show pop-out text"}</button>${prefs.get("capOn") && prefs.get("capLock") ? `<button class="btn primary" id="plUnlock">Unlock pop-out</button>` : ""}<span class="note">Right-click it for more. Colors and style under Aa.</span></div>`;
 
   if (mode === "tts") {
     const n = TTS.count || document.querySelectorAll(".page [data-s]").length || 1;
@@ -2237,7 +2238,7 @@ function updateDock(){
     const skipBtn = dir => `<button class="ib skipbtn" id="${dir < 0 ? "auBack" : "auFwd"}" aria-label="${dir < 0 ? "Back" : "Forward"} ${sk} seconds">${dir < 0 ? ICON.rw : ICON.ff}<span>${sk}</span></button>`;
     const playBtn = `<button class="play" id="auPlay" aria-label="${playing ? "Pause" : "Play"}">${playing ? ICON.pause : ICON.play}</button>`;
     if (!big) {
-      el.innerHTML = `<div class="dock">${note}
+      el.innerHTML = `<div class="dock">${pipSupported() ? `<div class="pip-grab" aria-hidden="true"></div>` : ""}${note}
         <div class="row1">${skipBtn(-1)}${playBtn}${skipBtn(1)}
           <div class="trk"><b>${esc(t.name)}</b><span>${tracks.length > 1 ? `Part ${ti + 1} of ${tracks.length}` : esc(b.title)}</span></div>
           <button class="chip" id="auRateBtn" aria-label="Playback speed, tap to change"><span data-rate-label>${rateTxt(rate)}</span></button>${expandBtn}
@@ -2316,6 +2317,7 @@ function updateDock(){
   }
   // shared controls
   const ex = $("#auExpand"); if (ex) ex.onclick = () => { S.bigPlayer = !S.bigPlayer; updateDock(); };
+  const fpip = $("#plPip"); if (fpip) { fpip.addEventListener("touchstart", () => pipPrepare(), { passive: true }); fpip.onclick = () => { if (PIP.on) pipClose(); else pipOpen(); setTimeout(updateDock, 600); }; }
   el.querySelectorAll("[data-pmode]").forEach(x => x.onclick = () => {
     const m = x.dataset.pmode; if (m === playerMode()) return;
     if (m === "book") stopReadAloud(); else if (!au.paused) au.pause();
@@ -3027,6 +3029,7 @@ function capInfo(){
   return bits.join(" · ");
 }
 function capSend(){
+  if (PIP.on) { pipDraw(); pipSync(); }
   if (!prefs.get("capOn")) return;
   const p = capPayload();
   if (TAURI) TAURI.event.emitTo("caption", "pk-caption", p).catch(() => {});
@@ -3038,6 +3041,151 @@ function setCaption(on){
   else if (!on) { const f = $("#floatcap"); if (f) f.remove(); }
   capSend();
 }
+/* Text picture-in-picture (iPhone and browsers): swipe up on the player and the page floats over your
+   other apps, gray until it's read, like the pop-out on the PC. iOS only lets videos float, so the text
+   is drawn into a small silent video. Its play/pause button plays and pauses the book. */
+const PIP = { v: null, cv: null, ctx: null, on: false, timer: 0, y: null, key: "", lines: [], H0: 0, syncAt: 0, W: 720, H: 540 };
+function pipSupported(){
+  if (TAURI || !HTMLCanvasElement.prototype.captureStream) return false;
+  const v = document.createElement("video");
+  return !!(document.pictureInPictureEnabled || (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode("picture-in-picture")));
+}
+const pipPlaying = () => capNow.speaking || !!(auBook && !au.paused);
+// Made ahead of time (when your finger touches the player), so the swipe can open it straight away.
+function pipPrepare(){
+  if (!pipSupported()) return null;
+  if (PIP.v) { if (PIP.v.paused) { PIP.syncAt = Date.now(); PIP.v.play().catch(() => {}); pipRun(); } return PIP.v; }
+  const cv = document.createElement("canvas"); cv.width = PIP.W; cv.height = PIP.H;
+  PIP.cv = cv; PIP.ctx = cv.getContext("2d"); pipDraw();
+  const v = document.createElement("video");
+  v.muted = true; v.playsInline = true; v.setAttribute("playsinline", ""); v.setAttribute("muted", ""); v.setAttribute("aria-hidden", "true");
+  v.style.cssText = "position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:.01;pointer-events:none;z-index:-1";
+  v.srcObject = cv.captureStream(12);
+  document.body.appendChild(v);
+  const on = () => { if (!PIP.on) { PIP.on = true; pipRun(); pipSync(); } };
+  const off = () => { if (PIP.on) { PIP.on = false; pipRun(); } };
+  v.addEventListener("enterpictureinpicture", on); v.addEventListener("leavepictureinpicture", off);
+  v.addEventListener("webkitpresentationmodechanged", () => v.webkitPresentationMode === "picture-in-picture" ? on() : off());
+  // The floating window's own play/pause button plays and pauses the book.
+  const btn = want => { if (!PIP.on || Date.now() - PIP.syncAt < 600) return; if (pipPlaying() !== want) playPauseAny(); };
+  v.addEventListener("pause", () => btn(false)); v.addEventListener("play", () => btn(true));
+  PIP.v = v; PIP.syncAt = Date.now(); v.play().catch(() => {});
+  pipRun();
+  return v;
+}
+function pipRun(){
+  clearInterval(PIP.timer); PIP.timer = 0;
+  if (PIP.on || (PIP.v && !PIP.v.paused)) PIP.timer = setInterval(pipDraw, 100);
+}
+// Keep the floating window's button showing the same as the player.
+function pipSync(){
+  if (!PIP.on || !PIP.v) return;
+  const want = pipPlaying(); if (want === !PIP.v.paused) return;
+  PIP.syncAt = Date.now();
+  if (want) PIP.v.play().catch(() => {}); else { pipDraw(); setTimeout(() => { PIP.syncAt = Date.now(); if (!pipPlaying() && PIP.on) PIP.v.pause(); }, 150); }
+}
+async function pipOpen(){
+  if (PIP.on) return;
+  const v = pipPrepare();
+  if (!v) { pipFallback(); return; }
+  try {
+    if (v.readyState < 1) await new Promise(r => { v.addEventListener("loadedmetadata", r, { once: true }); setTimeout(r, 1500); });
+    if (v.requestPictureInPicture && document.pictureInPictureEnabled) await v.requestPictureInPicture();
+    else v.webkitSetPresentationMode("picture-in-picture");
+    if (!prefs.get("pipTold")) { prefs.set("pipTold", true); toast("The text now floats over your other apps. Pinch it to resize, or drag it to a side to tuck it away."); }
+  } catch (e) { pipFallback(); }
+}
+function pipClose(){
+  if (!PIP.v) return;
+  try { if (document.pictureInPictureElement === PIP.v) document.exitPictureInPicture(); else if (PIP.v.webkitPresentationMode === "picture-in-picture") PIP.v.webkitSetPresentationMode("inline"); } catch {}
+}
+// No picture-in-picture here: show the whole page in Pagekeeper's own pop-out instead.
+function pipFallback(){
+  if (capMode() !== "page") setCapMode("page");
+  if (!prefs.get("capOn")) setCaption(true);
+  toast("Couldn't float the text over other apps, so it pops out inside Pagekeeper instead.");
+}
+// Lay the page out in lines, keeping each line's place in the page (the same counting as the pop-out).
+function pipLayout(ctx, paras, F, maxW){
+  const lines = []; let o = 0, y = 0; const L = Math.round(F * 1.4);
+  for (const { h, t } of paras) {
+    ctx.font = (h ? "700 " : "500 ") + F + "px -apple-system, system-ui, 'Segoe UI', sans-serif";
+    let line = "", ls = o;
+    const words = t.match(/\S+\s*|\s+/g) || [];
+    for (const w of words) {
+      if (line && ctx.measureText((line + w).trimEnd()).width > maxW) { lines.push({ s: ls, e: o, str: line, y, h }); y += L; line = ""; ls = o; }
+      line += w; o += w.length;
+    }
+    if (line.trim()) { lines.push({ s: ls, e: o, str: line, y, h }); y += L; }
+    y += Math.round(L * 0.45);
+  }
+  return { lines, height: y };
+}
+function pipDraw(){
+  const ctx = PIP.ctx; if (!ctx) return;
+  const W = PIP.W, H = PIP.H, pad = 34, F = 40, cfg = capCfg();
+  const fg = cfg.fg || CAP_DEFAULT.fg, bg = (cfg.bg && cfg.bg !== "transparent") ? cfg.bg : CAP_DEFAULT.bg;
+  const pg = capPage();
+  let paras, pos = -1, key;
+  if (pg) { paras = pg.blocks.map(([h, ss]) => ({ h, t: ss.join("") })); pos = pg.pos; key = pg.key; }
+  else { const p = capPayload(); const t = p.text || p.hint || "Open a book in Pagekeeper."; paras = [{ h: 0, t }]; key = "t|" + t; }
+  key += "|" + fg + bg;
+  if (key !== PIP.key) { const r = pipLayout(ctx, paras, F, W - pad * 2); PIP.lines = r.lines; PIP.H0 = r.height; PIP.key = key; PIP.y = null; }
+  const lines = PIP.lines, L = Math.round(F * 1.4), top = pad + 6, foot = 54;
+  // Keep the line being read about a third of the way down.
+  let cur = 0;
+  if (pos >= 0) { cur = lines.findIndex(l => pos < l.e); if (cur < 0) cur = lines.length - 1; }
+  const view = H - top - foot;
+  const ty = pos < 0 ? 0 : Math.max(0, Math.min(Math.max(0, PIP.H0 - view), (lines[cur] ? lines[cur].y : 0) - view * 0.34));
+  PIP.y = PIP.y == null ? ty : PIP.y + (ty - PIP.y) * 0.3;
+  if (Math.abs(ty - PIP.y) < 0.5) PIP.y = ty;
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.textBaseline = "top"; ctx.fillStyle = fg;
+  const gray = prefs.get("capGray") !== false && pos >= 0;
+  for (const l of lines) {
+    const y = top + l.y - PIP.y; if (y < -L || y > H) continue;
+    ctx.font = (l.h ? "700 " : "500 ") + F + "px -apple-system, system-ui, 'Segoe UI', sans-serif";
+    const s = l.str.trimEnd();
+    if (!gray || l.e <= pos) { ctx.globalAlpha = 1; ctx.fillText(s, pad, y); }
+    else if (l.s >= pos) { ctx.globalAlpha = 0.36; ctx.fillText(s, pad, y); }
+    else {
+      const a = s.slice(0, pos - l.s), b = s.slice(pos - l.s);
+      ctx.globalAlpha = 1; ctx.fillText(a, pad, y);
+      ctx.globalAlpha = 0.36; ctx.fillText(b, pad + ctx.measureText(a).width, y);
+    }
+  }
+  ctx.globalAlpha = 1;
+  // soft edges, then a small line at the bottom: chapter, time left, page
+  const fade = (y0, y1, from) => { const g = ctx.createLinearGradient(0, y0, 0, y1); g.addColorStop(0, from ? bg : pipAlpha(bg, 0)); g.addColorStop(1, from ? pipAlpha(bg, 0) : bg); ctx.fillStyle = g; ctx.fillRect(0, y0, W, y1 - y0); };
+  fade(0, top + 10, true); fade(H - foot - 30, H - foot, false);
+  ctx.fillStyle = bg; ctx.fillRect(0, H - foot, W, foot);
+  const info = [capInfo(), pg ? "Page " + pg.page + " of " + pg.pages : ""].filter(Boolean).join(" · ");
+  ctx.font = "500 24px -apple-system, system-ui, 'Segoe UI', sans-serif"; ctx.fillStyle = fg; ctx.globalAlpha = 0.6; ctx.textBaseline = "middle";
+  let it = info; while (it.length > 4 && ctx.measureText(it).width > W - pad * 2 - 40) it = it.slice(0, -2);
+  ctx.fillText(it === info ? it : it.trimEnd() + "…", pad, H - foot / 2);
+  if (!pipPlaying()) { ctx.globalAlpha = 0.8; ctx.fillText("Paused", W - pad - ctx.measureText("Paused").width, H - foot / 2); }
+  ctx.globalAlpha = 1;
+}
+function pipAlpha(c, a){
+  const m = /^#([0-9a-f]{6})$/i.exec(c || ""); if (!m) return "rgba(17,19,24," + a + ")";
+  const n = parseInt(m[1], 16); return "rgba(" + (n >> 16) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
+}
+// Swipe up on the small player to float the text.
+(() => {
+  const d = document;   // the player is drawn later, so listen on the whole page
+  let sx = 0, sy = 0, live = false;
+  d.addEventListener("touchstart", e => {
+    live = false; const t = e.touches[0];
+    if (e.touches.length !== 1 || !e.target.closest || !e.target.closest("#dock .dock:not(.big)") || e.target.closest("input")) return;
+    live = true; sx = t.clientX; sy = t.clientY; pipPrepare();
+  }, { passive: true });
+  d.addEventListener("touchend", e => {
+    if (!live) return; live = false;
+    const t = e.changedTouches[0], dy = sy - t.clientY, dx = Math.abs(t.clientX - sx);
+    if (dy > 40 && dy > dx * 1.4) { e.preventDefault(); pipOpen(); }
+    else if (PIP.v && !PIP.on && !PIP.v.paused) { PIP.syncAt = Date.now(); PIP.v.pause(); pipRun(); }
+  });
+})();
 if (TAURI && TAURI.event) {
   TAURI.event.listen("pk-caption-ready", () => capSend());
   TAURI.event.listen("pk-caption-closed", () => { if (prefs.get("capOn")) { prefs.set("capOn", false); if (S.sheet === "type") renderSheet(); } });

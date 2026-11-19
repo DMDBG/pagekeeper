@@ -30,6 +30,7 @@ struct ReaderWebView: UIViewRepresentable {
         config.setURLSchemeHandler(BundleSchemeHandler(), forURLScheme: BundleSchemeHandler.scheme)
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
+        config.allowsPictureInPictureMediaPlayback = true   // the floating text window (swipe up on the player)
         config.websiteDataStore = .default()   // keeps the library and downloaded files between launches
         config.userContentController.addScriptMessageHandler(context.coordinator.bridge, contentWorld: .page, name: "pk")
 
