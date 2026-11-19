@@ -77,7 +77,9 @@ jobs:
           notes="Pagekeeper $v
 
           - **Windows:** download Pagekeeper-Setup.exe and run it. After this, Pagekeeper updates itself (Settings → About → Check for updates).
-          - **iPhone:** download Pagekeeper.ipa and sideload it. To get updates automatically, use AltStore or SideStore and add this source: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/altstore.json"
+          - **iPhone:** download Pagekeeper.ipa (below) and sideload it, or import it into a signing service like Signulous. This link always gives the newest IPA: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/Pagekeeper.ipa
+          - **AltStore / SideStore / other signers:** add this source and updates come automatically: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/altstore.json
+          - **Easiest:** the download page, with buttons for all of this: https://dmdbg.github.io/pagekeeper/download.html"
           # The Windows and iPhone builds run side by side; whichever finishes first makes the release.
           gh release view "v$v" > /dev/null 2>&1 || gh release create "v$v" --title "Pagekeeper $v" --notes "$notes" --target "$GITHUB_SHA" || true
           for i in 1 2 3 4 5 6; do

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Get Pagekeeper</title>
+<meta name="description" content="Download Pagekeeper for iPhone (IPA for sideloading or signing services) and Windows.">
+<meta name="theme-color" content="#0E1218">
+<link rel="icon" href="icons/icon-192.png">
+<style>
+/* A small download page for Pagekeeper (served on GitHub Pages next to the web version). */
+:root{--bg:#0E1218;--card:#161B23;--ink:#E5E8EE;--muted:#97A0B0;--line:#262D38;--accent:#7C9BFF;--accent-ink:#0E1218;--ok:#3fbf68;color-scheme:dark}
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]){--bg:#F3F5F8;--card:#FFFFFF;--ink:#141C2B;--muted:#5B6576;--line:#DCE1E8;--accent:#3557D6;--accent-ink:#FFFFFF;color-scheme:light}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:720px;margin:0 auto;padding:32px 16px 64px}
+header{display:flex;align-items:center;gap:14px;margin-bottom:8px}
+header img{width:56px;height:56px;border-radius:14px}
+h1{font-size:28px;margin:0}
+.sub{color:var(--muted);margin:2px 0 24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin:0 0 16px}
+.card h2{margin:0 0 4px;font-size:20px}
+.ver{color:var(--muted);font-size:14px;margin:0 0 14px}
+.btns{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 6px}
+a.btn,button.btn{display:inline-flex;align-items:center;gap:8px;padding:11px 16px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--ink);font:inherit;font-weight:600;text-decoration:none;cursor:pointer}
+a.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+a.btn:hover,button.btn:hover{filter:brightness(1.1)}
+h3{font-size:16px;margin:18px 0 6px}
+ol{margin:6px 0 0;padding-left:22px}
+li{margin:4px 0}
+code{background:color-mix(in srgb,var(--ink) 10%,transparent);padding:2px 6px;border-radius:6px;font-size:14px;word-break:break-all}
+.note{color:var(--muted);font-size:14px}
+.tag{font-size:12px;padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok);font-weight:700;margin-left:6px}
+footer{color:var(--muted);font-size:13px;margin-top:24px}
+</style>
+</head>
+<body>
+<main>
+  <header><img src="icons/icon-192.png" alt=""><div><h1>Pagekeeper</h1></div></header>
+  <p class="sub">An ad-free reader for your EPUB, PDF and text books, with audiobooks that follow along. Your place syncs between iPhone and PC.</p>
+
+  <section class="card" id="ios">
+    <h2>iPhone</h2>
+    <p class="ver" id="iosVer">Latest version</p>
+    <div class="btns">
+      <a class="btn primary" id="ipaLink" href="https://github.com/DMDBG/pagekeeper/releases/latest/download/Pagekeeper.ipa">Download the IPA</a>
+      <button class="btn" id="copyIpa" type="button">Copy the IPA link</button>
+    </div>
+    <p class="note">This link always gives the newest version, so you can save it in your signing app.</p>
+
+    <h3>With a signing service (Signulous and similar)</h3>
+    <ol>
+      <li>Tap <b>Download the IPA</b> in Safari. It saves to the Files app, in Downloads.</li>
+      <li>In your signing app, choose to upload or import an app, and pick <b>Pagekeeper.ipa</b> from Files. If it can install from a link, paste the IPA link instead (use <b>Copy the IPA link</b>).</li>
+      <li>Sign and install. When Pagekeeper says a new version is out, do the same again; your books and progress stay.</li>
+    </ol>
+
+    <h3>With AltStore or SideStore <span class="tag">updates itself</span></h3>
+    <div class="btns">
+      <a class="btn" id="altLink" href="#">Add to AltStore</a>
+      <a class="btn" id="sideLink" href="#">Add to SideStore</a>
+      <button class="btn" id="copySrc" type="button">Copy the source link</button>
+    </div>
+    <p class="note">Other signers that take AltStore-style sources (repos), like Feather, ESign or Scarlet, can add the same source link. Updates then show up in that app.</p>
+
+    <h3>From a PC with Sideloadly</h3>
+    <p class="note" style="margin:0">Download the IPA on your PC, plug in your iPhone, and drag the IPA into <a href="https://sideloadly.io" style="color:var(--accent)">Sideloadly</a>. With a free Apple ID, re-sign it every 7 days.</p>
+  </section>
+
+  <section class="card" id="pc">
+    <h2>Windows</h2>
+    <p class="ver" id="winVer">Latest version</p>
+    <div class="btns"><a class="btn primary" href="https://github.com/DMDBG/pagekeeper/releases/latest/download/Pagekeeper-Setup.exe">Download for Windows</a></div>
+    <p class="note">Run the installer once; after that, Pagekeeper updates itself (Settings → About).</p>
+  </section>
+
+  <section class="card">
+    <h2>In a browser</h2>
+    <div class="btns"><a class="btn" href="./">Open the web version</a><a class="btn" href="https://github.com/DMDBG/pagekeeper/releases">Every version</a></div>
+  </section>
+
+  <footer>Pagekeeper is open source: <a href="https://github.com/DMDBG/pagekeeper" style="color:var(--accent)">github.com/DMDBG/pagekeeper</a></footer>
+</main>
+<script>
+(() => {
+  const REPO = "DMDBG/pagekeeper";
+  const IPA = `https://github.com/${REPO}/releases/latest/download/Pagekeeper.ipa`;
+  const SRC = `https://github.com/${REPO}/releases/latest/download/altstore.json`;
+  document.getElementById("altLink").href = "altstore://source?url=" + encodeURIComponent(SRC);
+  document.getElementById("sideLink").href = "sidestore://source?url=" + encodeURIComponent(SRC);
+  const copy = (btn, text, label) => btn.onclick = async () => {
+    try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+    catch { prompt("Copy this link:", text); }
+    setTimeout(() => btn.textContent = label, 2000);
+  };
+  copy(document.getElementById("copyIpa"), IPA, "Copy the IPA link");
+  copy(document.getElementById("copySrc"), SRC, "Copy the source link");
+  // Show which version the links give, and how big the files are.
+  fetch(`https://api.github.com/repos/${REPO}/releases/latest`).then(r => r.ok ? r.json() : null).then(j => {
+    if (!j) return;
+    const size = name => { const a = (j.assets || []).find(x => x.name === name); return a ? ` · ${(a.size / 1048576).toFixed(1)} MB` : ""; };
+    const when = j.published_at ? ` · ${new Date(j.published_at).toLocaleDateString()}` : "";
+    document.getElementById("iosVer").textContent = `Version ${String(j.tag_name).replace(/^v/, "")}${when}${size("Pagekeeper.ipa")}`;
+    document.getElementById("winVer").textContent = `Version ${String(j.tag_name).replace(/^v/, "")}${when}${size("Pagekeeper-Setup.exe")}`;
+  }).catch(() => {});
+})();
+</script>
+</body>
+</html>

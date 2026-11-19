@@ -4,6 +4,25 @@ An ad-free reader for EPUB, PDF and TXT books, with audiobooks that play while y
 Your page and listening spot sync between your iPhone and your PC. Everything also works offline,
 then catches up when you're back online.
 
+## Download
+
+**Easiest: open the download page on your iPhone or PC → [dmdbg.github.io/pagekeeper/download.html](https://dmdbg.github.io/pagekeeper/download.html)**
+
+| | Link (always the newest version) |
+|---|---|
+| **iPhone** (IPA, for sideloading or a signing service) | [Pagekeeper.ipa](https://github.com/DMDBG/pagekeeper/releases/latest/download/Pagekeeper.ipa) |
+| **Windows** (installer; updates itself afterwards) | [Pagekeeper-Setup.exe](https://github.com/DMDBG/pagekeeper/releases/latest/download/Pagekeeper-Setup.exe) |
+| **AltStore / SideStore / other signers** (source, so updates come automatically) | `https://github.com/DMDBG/pagekeeper/releases/latest/download/altstore.json` |
+| Every version | [Releases](https://github.com/DMDBG/pagekeeper/releases) |
+
+**iPhone with a signing service (Signulous and similar):** open the IPA link in Safari, which saves `Pagekeeper.ipa` to Files → Downloads. In your signing app, upload or import an app and pick that file (or paste the IPA link if it can install from a link). Then sign and install. The link above always points to the newest version, so you can reuse it for updates.
+
+**iPhone with AltStore or SideStore:** on the [download page](https://dmdbg.github.io/pagekeeper/download.html), tap **Add to AltStore** or **Add to SideStore**. Or add the source link from the table yourself. New versions then show up as updates. Feather, ESign, Scarlet and other signers that take AltStore-style sources can add the same link.
+
+---
+
+The rest of this page is for setting up your own copy (your own sync account and builds).
+
 - **iPhone:** a real app (an `.ipa`) that you sideload. The reader is built into the app, so it opens with no signal.
 - **PC:** the same app as a website on GitHub Pages. In Chrome or Edge you can install it, and it works offline too.
 - **Sync:** your own free Supabase project. Only you can read your library.
@@ -14,7 +33,7 @@ You set this up once, in about 30 minutes. You don't need a Mac.
 
 ## 1. Create your sync account (Supabase, free)
 
-1. Go to <https://supabase.com>, sign up, and click **New project**. Pick any name and a database password (you won't need the password again $jtkemper06!), then wait about a minute for it to start.
+1. Go to <https://supabase.com>, sign up, and click **New project**. Pick any name and a database password (you won't need the password again; keep it private, and never write it in this repo), then wait about a minute for it to start.
 2. Open **SQL Editor** → **New query**. Paste everything from [`supabase/setup.sql`](supabase/setup.sql) and click **Run**. You should see "Success".
 3. Open **Authentication** → **Sign In / Providers** → **Email** and turn **Confirm email** off. Then you can sign in right after creating your account. If you leave it on, you'll need to tap a link in an email first.
 4. Copy two values into [`web/config.js`](web/config.js):
