@@ -1827,7 +1827,11 @@ document.addEventListener("visibilitychange", () => plog(document.hidden ? "app 
    wasn't you (or the sleep timer, or headphones coming out), start it again. */
 const AUK = { want: false, unplug: 0, tries: 0 };
 au.pause = function(){ AUK.want = false; return HTMLMediaElement.prototype.pause.call(this); };
-au.addEventListener("playing", () => { AUK.want = true; AUK.tries = 0; });
+au.addEventListener("playing", () => { AUK.want = true; AUK.tries = 0; if (IOS) Native.call({ op: "keepAlive", on: true }).catch(() => {}); });
+// the app stays awake while you want the book playing; let it sleep once you've paused or it's finished
+const auSleepOk = () => { if (IOS && !AUK.want) Native.call({ op: "keepAlive", on: false }).catch(() => {}); };
+au.addEventListener("pause", () => setTimeout(auSleepOk, 0));
+au.addEventListener("ended", () => setTimeout(() => { if (au.paused) { AUK.want = false; auSleepOk(); } }, 3000));
 function auKeepGoing(){
   if (!AUK.want || !au.paused || au.ended || Date.now() - AUK.unplug < 2000 || !auBook) return;
   plog("starting the audio again");

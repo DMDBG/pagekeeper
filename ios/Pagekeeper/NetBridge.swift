@@ -41,6 +41,42 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
         }
     }
 
+    // The book's sound is played by WebKit's own media process. During a call iOS doesn't always count that
+    // as Pagekeeper playing, so it puts the app to sleep in the background: the audio then runs out of data
+    // about 10 seconds later and stops. A silent sound played by the app itself while the book plays tells
+    // iOS that Pagekeeper is playing audio, so it stays awake (the same reason video apps keep going).
+    private var keepAwakePlayer: AVAudioPlayer?
+    private var keepAwakeStop: DispatchWorkItem?
+
+    private static let silentWav: Data = {
+        let rate = 8000, seconds = 2, n = rate * seconds
+        var d = Data()
+        func u32(_ v: UInt32) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 4)) }
+        func u16(_ v: UInt16) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 2)) }
+        d.append("RIFF".data(using: .ascii)!); u32(UInt32(36 + n * 2)); d.append("WAVE".data(using: .ascii)!)
+        d.append("fmt ".data(using: .ascii)!); u32(16); u16(1); u16(1); u32(UInt32(rate)); u32(UInt32(rate * 2)); u16(2); u16(16)
+        d.append("data".data(using: .ascii)!); u32(UInt32(n * 2)); d.append(Data(count: n * 2))
+        return d
+    }()
+
+    private func setKeepAwake(_ on: Bool) {
+        keepAwakeStop?.cancel(); keepAwakeStop = nil
+        if on {
+            if keepAwakePlayer == nil {
+                keepAwakePlayer = try? AVAudioPlayer(data: Self.silentWav)
+                keepAwakePlayer?.numberOfLoops = -1
+                keepAwakePlayer?.volume = 0.01
+            }
+            try? AVAudioSession.sharedInstance().setActive(true)
+            if keepAwakePlayer?.isPlaying == false { keepAwakePlayer?.play() }
+        } else {
+            // stop a little later, so a quick pause and play (or the next part loading) doesn't drop it
+            let work = DispatchWorkItem { [weak self] in self?.keepAwakePlayer?.stop() }
+            keepAwakeStop = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: work)
+        }
+    }
+
     private func setUpAudioEvents() {
         guard !audioEventsSet else { return }
         audioEventsSet = true
@@ -52,6 +88,7 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
                 self?.setMixing(true)
                 self?.post("interrupted")
             } else {
+                if self?.keepAwakePlayer?.isPlaying == false, self?.keepAwakeStop == nil, self?.keepAwakePlayer != nil { self?.keepAwakePlayer?.play() }
                 self?.post("resume")
             }
         }
@@ -186,6 +223,11 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
             let mode = body["mode"] as? String ?? "dark"
             let style: UIUserInterfaceStyle = mode == "light" ? .light : mode == "system" ? .unspecified : .dark
             webView?.window?.overrideUserInterfaceStyle = style
+            replyHandler(true, nil)
+
+        case "keepAlive":
+            // While a book plays, keep Pagekeeper itself awake in the background (see keepAwake below).
+            setKeepAwake((body["on"] as? Bool) ?? false)
             replyHandler(true, nil)
 
         case "volumeGet":
