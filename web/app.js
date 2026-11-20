@@ -11,7 +11,7 @@ const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
 const WHATS_NEW = { id: "pip-2", items: [
   "<b>No more stops between parts:</b> about 10 minutes before a part ends, the next part downloads by itself (if it's in your account and not on this device yet), so the book keeps playing straight through.",
-  "<b>Float the text over other apps:</b> on your iPhone, tap the pop-out button at the top of a book, or swipe up on the small player at the bottom. The page floats in a little window over your other apps, gray until it's read, then in color. Its play/pause button plays and pauses the book. In the full player it's <b>Float text over other apps</b>.",
+  "<b>Float the text over other apps:</b> on your iPhone, tap the pop-out button at the top of a book, or swipe up on the small player at the bottom. The page floats in a little window over your other apps, gray until it's read, then in color. Play and pause the book from the lock screen or Control Center. In the full player it's <b>Float text over other apps</b>.",
   "<b>Pop out the whole page:</b> under <b>Aa → Pop-out shows</b>, pick <b>The whole page</b> and a size (Phone, Tablet, Book page or Wide). Words are gray until they're read, then come into color. Double-click a word (double-tap on iPhone) to move the audiobook or read-aloud to it. Its top bar has play, skip, page turns and text size.",
   "<b>Choose the AI for recaps</b> in Settings → AI recaps: Claude, or free options (Google Gemini, Groq, OpenRouter, Mistral), or Ollama running on your PC with no key at all.",
   "<b>Highlights, notes and bookmarks:</b> select text to highlight it, add a note or look a word up. The bookmark button marks a page. Everything is under <b>Contents → Notes</b>, syncs to your other devices, and can be copied or saved as a file.",
@@ -3094,12 +3094,14 @@ function pipPrepare(){
   document.body.appendChild(v);
   const mark = () => { const rp = $("#rPop"); if (rp && IOS) rp.setAttribute("aria-pressed", PIP.on); };
   const on = () => { if (!PIP.on) { PIP.on = true; pipRun(); pipSync(); mark(); } };
-  const off = () => { if (PIP.on) { PIP.on = false; pipRun(); mark(); } };
+  const off = () => { if (PIP.on) { PIP.on = false; PIP.v.pause(); pipRun(); mark(); } };
   v.addEventListener("enterpictureinpicture", on); v.addEventListener("leavepictureinpicture", off);
   v.addEventListener("webkitpresentationmodechanged", () => v.webkitPresentationMode === "picture-in-picture" ? on() : off());
   // The floating window's own play/pause button plays and pauses the book.
-  const btn = want => { if (!PIP.on || Date.now() - PIP.syncAt < 600) return; if (pipPlaying() !== want) playPauseAny(); };
-  v.addEventListener("pause", () => btn(false)); v.addEventListener("play", () => btn(true));
+  // The floating window is only a picture of the text: it never plays or pauses the book. (iOS pauses this
+  // little video by itself now and then; treating that as a tap on pause kept stopping the book.)
+  // If it gets paused while floating, start it again so the text keeps moving.
+  v.addEventListener("pause", () => { if (!PIP.on || Date.now() - PIP.syncAt < 3000) return; PIP.syncAt = Date.now(); setTimeout(() => { if (PIP.on && PIP.v.paused) PIP.v.play().catch(() => {}); }, 300); });
   PIP.v = v; PIP.syncAt = Date.now(); v.play().catch(() => {});
   pipRun();
   return v;
@@ -3111,9 +3113,7 @@ function pipRun(){
 // Keep the floating window's button showing the same as the player.
 function pipSync(){
   if (!PIP.on || !PIP.v) return;
-  const want = pipPlaying(); if (want === !PIP.v.paused) return;
-  PIP.syncAt = Date.now();
-  if (want) PIP.v.play().catch(() => {}); else { pipDraw(); setTimeout(() => { PIP.syncAt = Date.now(); if (!pipPlaying() && PIP.on) PIP.v.pause(); }, 150); }
+  if (PIP.v.paused) PIP.v.play().catch(() => {});
 }
 async function pipOpen(){
   if (PIP.on) return;
@@ -3124,7 +3124,7 @@ async function pipOpen(){
     if (v.requestPictureInPicture && document.pictureInPictureEnabled) await v.requestPictureInPicture();
     else v.webkitSetPresentationMode("picture-in-picture");
     if (!prefs.get("pipTold")) { prefs.set("pipTold", true); toast("The text now floats. Go to any other app and it stays on top. Pinch it to resize, or drag it to a side to tuck it away."); }
-  } catch (e) { pipFallback(); }
+  } catch (e) { if (PIP.v) PIP.v.pause(); pipRun(); pipFallback(); }
 }
 function pipClose(){
   if (!PIP.v) return;
