@@ -8,7 +8,59 @@ import MediaPlayer
 /// and open the in-app browser. Called from JS as:
 ///   await window.webkit.messageHandlers.pk.postMessage({op: "text" | "file" | "done" | "browse", ...})
 final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
-    weak var webView: WKWebView?
+    weak var webView: WKWebView? { didSet { setUpAudioEvents() } }
+
+    // MARK: calls and other audio
+    // Like a video app, keep the book playing during a call (Discord, FaceTime, a phone call...):
+    // when another app takes the audio, share it instead of stopping, and tell the page so it can carry on.
+    // Unplugging headphones still pauses, as it should.
+    private var audioEventsSet = false
+    private var mixing = false
+    private var mixTimer: Timer?
+
+    private func post(_ what: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript("window.pkAudio && window.pkAudio('\(what)')")
+        }
+    }
+
+    private func setMixing(_ on: Bool) {
+        guard on != mixing else { return }
+        let s = AVAudioSession.sharedInstance()
+        do {
+            try s.setCategory(.playback, mode: .spokenAudio, options: on ? [.mixWithOthers] : [])
+            try s.setActive(true)
+            mixing = on
+        } catch { return }
+        mixTimer?.invalidate(); mixTimer = nil
+        if on {
+            // when the call is over, go back to being the main audio (lock screen controls come back)
+            mixTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+                if !AVAudioSession.sharedInstance().isOtherAudioPlaying { self?.setMixing(false) }
+            }
+        }
+    }
+
+    private func setUpAudioEvents() {
+        guard !audioEventsSet else { return }
+        audioEventsSet = true
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            if type == .began {
+                self?.setMixing(true)
+                self?.post("interrupted")
+            } else {
+                self?.post("resume")
+            }
+        }
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+            if reason == .oldDeviceUnavailable { self?.post("unplugged") }   // headphones out: stay paused
+        }
+    }
     private var observers: [String: NSKeyValueObservation] = [:]
 
     // MARK: volume

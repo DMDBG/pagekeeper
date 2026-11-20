@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "pip-2", items: [
+const WHATS_NEW = { id: "pip-3", items: [
+  "<b>Keeps playing during calls:</b> like a video app, the book keeps going while you're on a Discord, FaceTime or phone call, and picks itself back up if something else stops it. Pausing it yourself, or taking your headphones out, still pauses it.",
   "<b>No more stops between parts:</b> about 10 minutes before a part ends, the next part downloads by itself (if it's in your account and not on this device yet), so the book keeps playing straight through.",
   "<b>Float the text over other apps:</b> on your iPhone, tap the pop-out button at the top of a book, or swipe up on the small player at the bottom. The page floats in a little window over your other apps, gray until it's read, then in color. Play and pause the book from the lock screen or Control Center. In the full player it's <b>Float text over other apps</b>.",
   "<b>Pop out the whole page:</b> under <b>Aa → Pop-out shows</b>, pick <b>The whole page</b> and a size (Phone, Tablet, Book page or Wide). Words are gray until they're read, then come into color. Double-click a word (double-tap on iPhone) to move the audiobook or read-aloud to it. Its top bar has play, skip, page turns and text size.",
@@ -1802,6 +1803,25 @@ au.addEventListener("loadedmetadata", () => { updateTimes(); const b = auBook &&
 au.addEventListener("seeked", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } followTick(true); });
 au.addEventListener("play", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } updateDock(); followTick(true); capSend(); });
 au.addEventListener("pause", () => { saveAudioPos(true); updateDock(); followStopCap(); updateFollowPill(); capSend(); });
+/* Keep playing through calls and other interruptions, like a video app does. If the audio stops and it
+   wasn't you (or the sleep timer, or headphones coming out), start it again. */
+const AUK = { want: false, unplug: 0, tries: 0 };
+au.pause = function(){ AUK.want = false; return HTMLMediaElement.prototype.pause.call(this); };
+au.addEventListener("playing", () => { AUK.want = true; AUK.tries = 0; });
+function auKeepGoing(){
+  if (!AUK.want || !au.paused || au.ended || Date.now() - AUK.unplug < 2000 || !auBook) return;
+  au.play().catch(() => {});
+}
+au.addEventListener("pause", () => {
+  if (!AUK.want || au.ended) return;
+  // Not a pause from you: try again shortly, then a few more times while the call settles.
+  [400, 1500, 4000, 10000].forEach(ms => setTimeout(auKeepGoing, ms));
+});
+window.pkAudio = what => {
+  if (what === "unplugged") { AUK.unplug = Date.now(); AUK.want = false; return; }
+  if (what === "resume" || what === "interrupted") [300, 1200, 3000].forEach(ms => setTimeout(auKeepGoing, ms));
+};
+document.addEventListener("visibilitychange", () => { if (!document.hidden) auKeepGoing(); });
 au.addEventListener("ended", async () => {
   const b = auBook && S.books[auBook.id]; if (!b) return;
   const nxt = auBook.track + 1;
