@@ -830,7 +830,7 @@ function renderSettings(el){
     <div class="panel">
       <h3>About</h3>
       <p class="note" style="margin:0">Pagekeeper ${esc(BUILD.version)}${BUILD.sha ? ` · build ${esc(BUILD.sha)}` : ""}${BUILD.date ? ` · ${esc(BUILD.date)}` : ""} · ${TAURI ? "Windows app" : IOS ? "iPhone app" : "web version"}</p>
-      <div class="row-btns"><button class="btn" id="showNew">What's new</button>${(TAURI || IOS) ? `<button class="btn" id="checkUpd">Check for updates</button>` : ""}${Object.values(S.books).some(b => b.builtin && !b.deleted) ? "" : `<button class="btn" id="guideBack">Show the welcome guide again</button>`}</div>
+      <div class="row-btns"><button class="btn" id="showNew">What's new</button><button class="btn" id="copyLog">Copy playback log</button>${(TAURI || IOS) ? `<button class="btn" id="checkUpd">Check for updates</button>` : ""}${Object.values(S.books).some(b => b.builtin && !b.deleted) ? "" : `<button class="btn" id="guideBack">Show the welcome guide again</button>`}</div>
       ${updateNote()}
     </div>`;
   el.querySelectorAll("[data-theme-pick]").forEach(b => b.onclick = () => { prefs.set("theme", b.dataset.themePick); applyTheme(); renderSettings(el); });
@@ -871,6 +871,11 @@ function renderSettings(el){
   $("#devName").onchange = e => { const v = e.target.value.trim(); if (v) prefs.set("device", v); };
   $("#setCap").onclick = () => { setCaption(!prefs.get("capOn")); renderSettings(el); };
   $("#showNew").onclick = () => { prefs.set("seenNew", undefined); S.view = "library"; render(); };
+  $("#copyLog").onclick = async () => {
+    const txt = "Pagekeeper " + BUILD.version + " playback log" + String.fromCharCode(10) + PKLOG.slice(-250).join(String.fromCharCode(10));
+    try { await navigator.clipboard.writeText(txt); toast("Playback log copied. Paste it into your message to Claude."); }
+    catch { const ta = document.createElement("textarea"); ta.value = txt; ta.style.cssText = "position:fixed;inset:10% 5%;z-index:9999;font:12px monospace"; document.body.appendChild(ta); ta.select(); toast("Select all the text in the box, copy it, then tap outside to close it."); ta.onblur = () => ta.remove(); }
+  };
   if (signed) {
     $("#syncNow").onclick = async () => { await syncNow(); renderSettings(el); toast(S.net === "ok" ? "Up to date." : S.net === "offline" ? "You're offline. Changes will sync later." : "Couldn't sync: " + esc(S.netMsg)); };
     $("#signOut").onclick = () => confirmBox("Sign out?", "Your books stay on this device, but stop syncing until you sign in again.", "Sign out", () => { Cloud.signOut(); setNet("local"); render(); });
@@ -1741,8 +1746,9 @@ function prefetchNext(){
   if (Date.now() - (PREF.failed[n.key] || 0) < 60000) return;   // after a failed try, wait a minute
   PREF.key = n.key;
   PREF.p = (async () => {
-    try { if (await idb.get(n.key)) S.haveLocal[n.key] = true; else await fetchTrack(n); }
-    catch { PREF.failed[n.key] = Date.now(); }
+    plog("downloading the next part ahead");
+    try { if (await idb.get(n.key)) S.haveLocal[n.key] = true; else await fetchTrack(n); plog("next part ready"); }
+    catch (e) { PREF.failed[n.key] = Date.now(); plog("next part download failed"); }
     finally { PREF.p = null; PREF.key = ""; if (S.dock && S.cur === b.id && S.showTracks) updateDock(); }
   })();
 }
@@ -1803,6 +1809,20 @@ au.addEventListener("loadedmetadata", () => { updateTimes(); const b = auBook &&
 au.addEventListener("seeked", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } followTick(true); });
 au.addEventListener("play", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } updateDock(); followTick(true); capSend(); });
 au.addEventListener("pause", () => { saveAudioPos(true); updateDock(); followStopCap(); updateFollowPill(); capSend(); });
+/* Playback log: what the audio and the floating text did, and when. Settings → About → Copy playback log,
+   so a problem on the phone can be pasted into a message. Kept on this device only. */
+const PKLOG = (() => { try { return JSON.parse(localStorage.getItem("pkLog") || "[]"); } catch { return []; } })();
+let pkLogSave = 0;
+function plog(what){
+  const d = new Date(), t = d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0").slice(0, 1);
+  PKLOG.push(t + " " + what + (auBook ? " @" + (au.currentTime || 0).toFixed(1) + "s p" + (auBook.track + 1) : ""));
+  if (PKLOG.length > 400) PKLOG.splice(0, PKLOG.length - 400);
+  clearTimeout(pkLogSave); pkLogSave = setTimeout(() => { try { localStorage.setItem("pkLog", JSON.stringify(PKLOG)); } catch {} }, 500);
+}
+plog("app started " + BUILD.version + (document.hidden ? " (in background)" : ""));
+["play", "playing", "waiting", "stalled", "ended", "error", "emptied", "ratechange"].forEach(ev => au.addEventListener(ev, () => plog("audio " + ev + (ev === "error" && au.error ? " " + au.error.code : ""))));
+au.addEventListener("pause", () => plog("audio pause (" + (AUK.want ? "NOT by you" : "by you") + ")"));
+document.addEventListener("visibilitychange", () => plog(document.hidden ? "app went to background" : "app came back"));
 /* Keep playing through calls and other interruptions, like a video app does. If the audio stops and it
    wasn't you (or the sleep timer, or headphones coming out), start it again. */
 const AUK = { want: false, unplug: 0, tries: 0 };
@@ -1810,7 +1830,8 @@ au.pause = function(){ AUK.want = false; return HTMLMediaElement.prototype.pause
 au.addEventListener("playing", () => { AUK.want = true; AUK.tries = 0; });
 function auKeepGoing(){
   if (!AUK.want || !au.paused || au.ended || Date.now() - AUK.unplug < 2000 || !auBook) return;
-  au.play().catch(() => {});
+  plog("starting the audio again");
+  au.play().catch(e => plog("couldn't start again: " + ((e && e.name) || e)));
 }
 au.addEventListener("pause", () => {
   if (!AUK.want || au.ended) return;
@@ -1818,6 +1839,7 @@ au.addEventListener("pause", () => {
   [400, 1500, 4000, 10000].forEach(ms => setTimeout(auKeepGoing, ms));
 });
 window.pkAudio = what => {
+  plog("iPhone says: " + what);
   if (what === "unplugged") { AUK.unplug = Date.now(); AUK.want = false; return; }
   if (what === "resume" || what === "interrupted") [300, 1200, 3000].forEach(ms => setTimeout(auKeepGoing, ms));
 };
@@ -3120,6 +3142,8 @@ function pipPrepare(){
   const on = () => { if (!PIP.on) { PIP.on = true; pipRun(); pipSync(); mark(); } };
   const off = () => { if (PIP.on) { PIP.on = false; PIP.v.pause(); pipRun(); mark(); } };
   v.addEventListener("enterpictureinpicture", on); v.addEventListener("leavepictureinpicture", off);
+  ["pause", "play", "waiting", "stalled"].forEach(ev => v.addEventListener(ev, () => plog("floating text video " + ev)));
+  v.addEventListener("enterpictureinpicture", () => plog("floating text opened")); v.addEventListener("leavepictureinpicture", () => plog("floating text closed"));
   v.addEventListener("webkitpresentationmodechanged", () => v.webkitPresentationMode === "picture-in-picture" ? on() : off());
   // The floating window's own play/pause button plays and pauses the book.
   // The floating window is only a picture of the text: it never plays or pauses the book. (iOS pauses this
@@ -3203,7 +3227,9 @@ function pipDraw(){
   // Nothing changed: don't redraw. Drawing less leaves the phone more room to keep the audio flowing.
   const info = [capInfo(), pg ? "Page " + pg.page + " of " + pg.pages : ""].filter(Boolean).join(" · ");
   const sig = key + "|" + pos + "|" + Math.round(PIP.y) + "|" + info + "|" + pipPlaying() + "|" + (prefs.get("capGray") !== false);
-  if (sig === PIP.sig) return moving;
+  // (still send a fresh picture every second, so iOS never thinks the floating video has stalled)
+  if (sig === PIP.sig && now - (PIP.drawn || 0) < 1000) return moving;
+  PIP.drawn = now;
   PIP.sig = sig;
   ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
   ctx.textBaseline = "top"; ctx.fillStyle = fg;
