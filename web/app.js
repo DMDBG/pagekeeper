@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "pip-1", items: [
+const WHATS_NEW = { id: "pip-2", items: [
+  "<b>No more stops between parts:</b> about 10 minutes before a part ends, the next part downloads by itself (if it's in your account and not on this device yet), so the book keeps playing straight through.",
   "<b>Float the text over other apps:</b> on your iPhone, tap the pop-out button at the top of a book, or swipe up on the small player at the bottom. The page floats in a little window over your other apps, gray until it's read, then in color. Its play/pause button plays and pauses the book. In the full player it's <b>Float text over other apps</b>.",
   "<b>Pop out the whole page:</b> under <b>Aa → Pop-out shows</b>, pick <b>The whole page</b> and a size (Phone, Tablet, Book page or Wide). Words are gray until they're read, then come into color. Double-click a word (double-tap on iPhone) to move the audiobook or read-aloud to it. Its top bar has play, skip, page turns and text size.",
   "<b>Choose the AI for recaps</b> in Settings → AI recaps: Claude, or free options (Google Gemini, Groq, OpenRouter, Mistral), or Ollama running on your PC with no key at all.",
@@ -1726,7 +1727,26 @@ async function downloadAll(){
   }
   clearToasts(); toast("All audio is on this device. It plays offline now.");
 }
+/* Near the end of a part, the next part downloads in the background (if it's in your account and not
+   on this device yet), so the book keeps playing without stopping between parts. */
+const PREF = { key: "", p: null, failed: {} };
+const PREF_SECS = 10 * 60;   // start this long (at your listening speed) before the part ends
+function prefetchNext(){
+  if (!auBook || PREF.p || !isFinite(au.duration) || !au.duration) return;
+  const left = (au.duration - (au.currentTime || 0)) / (au.playbackRate || 1);
+  if (left > PREF_SECS) return;
+  const b = S.books[auBook.id], n = b?.audio?.tracks?.[auBook.track + 1];
+  if (!n || !n.asset || S.haveLocal[n.key] || !Cloud.signedIn() || navigator.onLine === false) return;
+  if (Date.now() - (PREF.failed[n.key] || 0) < 60000) return;   // after a failed try, wait a minute
+  PREF.key = n.key;
+  PREF.p = (async () => {
+    try { if (await idb.get(n.key)) S.haveLocal[n.key] = true; else await fetchTrack(n); }
+    catch { PREF.failed[n.key] = Date.now(); }
+    finally { PREF.p = null; PREF.key = ""; if (S.dock && S.cur === b.id && S.showTracks) updateDock(); }
+  })();
+}
 async function trackSrc(t){
+  if (PREF.p && PREF.key === t.key) { toast("Finishing the download of this part…", null, 60000); await PREF.p; clearToasts(); }
   let blob = await idb.get(t.key);
   if (!blob && t.asset && Cloud.signedIn() && navigator.onLine !== false) { toast("Downloading this part…", null, 60000); try { blob = await fetchTrack(t); } catch { blob = null; } clearToasts(); }
   if (!blob) return null;
@@ -1777,7 +1797,7 @@ function saveAudioPos(force){
   auSaveAt = now;
   save(auBook.id, { audio: { track: auBook.track, time: t } });
 }
-au.addEventListener("timeupdate", () => { saveAudioPos(false); updateTimes(); followTick(false); });
+au.addEventListener("timeupdate", () => { saveAudioPos(false); updateTimes(); followTick(false); prefetchNext(); });
 au.addEventListener("loadedmetadata", () => { updateTimes(); const b = auBook && S.books[auBook.id], t = b && b.audio.tracks[auBook.track]; if (t) setDur(t.key, au.duration); });
 au.addEventListener("seeked", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } followTick(true); });
 au.addEventListener("play", () => { if (S.followHold) { S.followHold = false; updateFollowPill(); } updateDock(); followTick(true); capSend(); });
