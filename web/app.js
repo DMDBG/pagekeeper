@@ -2970,8 +2970,12 @@ const CAP_SIZES = { phone: [390, 720, "Phone"], tablet: [640, 860, "Tablet"], bo
 function capPage(){
   if (S.view !== "reader" || !S.cur) return null;
   const c = S.content[S.cur]; if (!c || c.kind !== "text") return null;
-  const blocks = (c.pages[S.page - 1] || []).map(([t, x]) => [t === "h" ? 1 : 0, t === "h" ? [x] : splitS(x)]);
-  const total = blocks.reduce((a, [, ss]) => a + ss.reduce((n, q) => n + q.length, 0), 0);
+  // the page split into sentences, kept until the page changes (this runs several times a second)
+  if (!c._cp || c._cp.page !== S.page) {
+    const bl = (c.pages[S.page - 1] || []).map(([t, x]) => [t === "h" ? 1 : 0, t === "h" ? [x] : splitS(x)]);
+    c._cp = { page: S.page, blocks: bl, total: bl.reduce((a, [, ss]) => a + ss.reduce((n, q) => n + q.length, 0), 0) };
+  }
+  const { blocks, total } = c._cp;
   let pos = -1;
   const audioHere = capNow.abook === S.cur && capNow.apage && auBook && auBook.id === S.cur;
   if (audioHere && (!au.paused || !capNow.speaking)) pos = capNow.apage === S.page ? Math.min(total, capNow.apos) : capNow.apage > S.page ? total : 0;
@@ -3090,7 +3094,7 @@ function pipPrepare(){
   const v = document.createElement("video");
   v.muted = true; v.playsInline = true; v.setAttribute("playsinline", ""); v.setAttribute("muted", ""); v.setAttribute("aria-hidden", "true");
   v.style.cssText = "position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:.01;pointer-events:none;z-index:-1";
-  v.srcObject = cv.captureStream(12);
+  v.srcObject = cv.captureStream(30);
   document.body.appendChild(v);
   const mark = () => { const rp = $("#rPop"); if (rp && IOS) rp.setAttribute("aria-pressed", PIP.on); };
   const on = () => { if (!PIP.on) { PIP.on = true; pipRun(); pipSync(); mark(); } };
@@ -3107,8 +3111,11 @@ function pipPrepare(){
   return v;
 }
 function pipRun(){
-  clearInterval(PIP.timer); PIP.timer = 0;
-  if (PIP.on || (PIP.v && !PIP.v.paused)) PIP.timer = setInterval(pipDraw, 100);
+  clearTimeout(PIP.timer); PIP.timer = 0;
+  if (!(PIP.on || (PIP.v && !PIP.v.paused))) return;
+  // Quick frames only while the text is gliding up to the next line; otherwise a light check 8 times a second.
+  const tick = () => { const moving = pipDraw(); PIP.timer = setTimeout(tick, moving ? 40 : 125); };
+  PIP.timer = setTimeout(tick, 0);
 }
 // Keep the floating window's button showing the same as the player.
 function pipSync(){
@@ -3168,8 +3175,16 @@ function pipDraw(){
   if (pos >= 0) { cur = lines.findIndex(l => pos < l.e); if (cur < 0) cur = lines.length - 1; }
   const view = H - top - foot;
   const ty = pos < 0 ? 0 : Math.max(0, Math.min(Math.max(0, PIP.H0 - view), (lines[cur] ? lines[cur].y : 0) - view * 0.34));
-  PIP.y = PIP.y == null ? ty : PIP.y + (ty - PIP.y) * 0.3;
+  // glide smoothly (by time, so it looks the same however often this runs)
+  const now = performance.now(), dt = Math.min(250, now - (PIP.t || now)); PIP.t = now;
+  PIP.y = PIP.y == null ? ty : PIP.y + (ty - PIP.y) * (1 - Math.exp(-dt / 90));
   if (Math.abs(ty - PIP.y) < 0.5) PIP.y = ty;
+  const moving = PIP.y !== ty;
+  // Nothing changed: don't redraw. Drawing less leaves the phone more room to keep the audio flowing.
+  const info = [capInfo(), pg ? "Page " + pg.page + " of " + pg.pages : ""].filter(Boolean).join(" · ");
+  const sig = key + "|" + pos + "|" + Math.round(PIP.y) + "|" + info + "|" + pipPlaying() + "|" + (prefs.get("capGray") !== false);
+  if (sig === PIP.sig) return moving;
+  PIP.sig = sig;
   ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
   ctx.textBaseline = "top"; ctx.fillStyle = fg;
   const gray = prefs.get("capGray") !== false && pos >= 0;
@@ -3190,12 +3205,12 @@ function pipDraw(){
   const fade = (y0, y1, from) => { const g = ctx.createLinearGradient(0, y0, 0, y1); g.addColorStop(0, from ? bg : pipAlpha(bg, 0)); g.addColorStop(1, from ? pipAlpha(bg, 0) : bg); ctx.fillStyle = g; ctx.fillRect(0, y0, W, y1 - y0); };
   fade(0, top + 10, true); fade(H - foot - 30, H - foot, false);
   ctx.fillStyle = bg; ctx.fillRect(0, H - foot, W, foot);
-  const info = [capInfo(), pg ? "Page " + pg.page + " of " + pg.pages : ""].filter(Boolean).join(" · ");
   ctx.font = "500 24px -apple-system, system-ui, 'Segoe UI', sans-serif"; ctx.fillStyle = fg; ctx.globalAlpha = 0.6; ctx.textBaseline = "middle";
   let it = info; while (it.length > 4 && ctx.measureText(it).width > W - pad * 2 - 40) it = it.slice(0, -2);
   ctx.fillText(it === info ? it : it.trimEnd() + "…", pad, H - foot / 2);
   if (!pipPlaying()) { ctx.globalAlpha = 0.8; ctx.fillText("Paused", W - pad - ctx.measureText("Paused").width, H - foot / 2); }
   ctx.globalAlpha = 1;
+  return moving;
 }
 function pipAlpha(c, a){
   const m = /^#([0-9a-f]{6})$/i.exec(c || ""); if (!m) return "rgba(17,19,24," + a + ")";
