@@ -1473,7 +1473,21 @@ function renderSheet(){
 /* On iPhone the book is played by the app itself (like a video app), not by a web <audio> element:
    WebKit sets the phone's audio up its own way, and during calls the book kept getting starved and cut.
    This stands in for the <audio> element, so the rest of the app doesn't need to know the difference. */
-const NATIVE_AU = IOS;
+// (falls back to the web player by itself if the iPhone player ever can't open a part)
+const NATIVE_AU = IOS && prefs.get("nativeAuOff") !== BUILD.version;   // each new version tries the iPhone player again
+function nativeAuFailed(why){
+  plog("iPhone player failed (" + why + "), going back to the old player");
+  prefs.set("nativeAuOff", BUILD.version);
+  toast("Switching to the backup audio player…", null, 4000);
+  setTimeout(() => location.reload(), 1200);
+}
+// The iPhone player needs the file type at the end of the name (.mp3, .m4b…) to open it.
+function auExt(t, blob){
+  const m = /\.(mp3|m4a|m4b|aac|wav|flac|mp4|caf|aif|aiff|aifc)$/i.exec((t && (t.file || t.name)) || "");
+  if (m) return m[1].toLowerCase();
+  const ty = (blob && blob.type) || "";
+  return /mp4|m4a|m4b|aac|x-m4/.test(ty) ? "m4a" : /wav/.test(ty) ? "wav" : /flac/.test(ty) ? "flac" : /aiff/.test(ty) ? "aiff" : "mp3";
+}
 function nativeAudio(){
   const et = new EventTarget(), fire = n => et.dispatchEvent(new Event(n));
   const call = (act, o = {}) => Native.call({ op: "au", act, ...o });
@@ -1496,7 +1510,7 @@ function nativeAudio(){
       set(k){
         A._key = k; A._ended = false; A._paused = true; A.readyState = 0; A._d = NaN; A._t = 0; A.error = null; fire("emptied");
         call("load", { key: k }).then(ok => { if (!ok) throw new Error("part not here"); })
-          .catch(e => { A.error = { code: 4, message: String((e && e.message) || e) }; fire("error"); });
+          .catch(e => { A.error = { code: 4, message: String((e && e.message) || e) }; plog("player couldn't load: " + A.error.message); fire("error"); nativeAuFailed("load"); });
       }
     }
   });
@@ -1519,7 +1533,7 @@ function nativeAudio(){
       case "paused": if (!A._paused) { A._paused = true; fire("pause"); } break;   // not from the page: a call, headphones…
       case "seeked": A.seeking = false; if (typeof m.t === "number") { A._t = m.t; A._tAt = now; } fire("seeked"); fire("timeupdate"); break;
       case "ended": A._t = isFinite(A._d) ? A._d : A._t; A._ended = true; if (!A._paused) { A._paused = true; fire("pause"); } fire("ended"); break;
-      case "error": A.error = { code: m.code || 4, message: m.msg || "" }; fire("error"); break;
+      case "error": A.error = { code: m.code || 4, message: m.msg || "" }; plog("player error: " + (m.msg || m.code)); fire("error"); nativeAuFailed(m.msg || "error"); break;
       case "remote": auRemote(m); break;
     }
   };
@@ -1840,7 +1854,11 @@ async function trackSrc(t){
   let blob = await idb.get(t.key);
   if (!blob && t.asset && Cloud.signedIn() && navigator.onLine !== false) { toast("Downloading this part…", null, 60000); try { blob = await fetchTrack(t); } catch { blob = null; } clearToasts(); }
   if (!blob) return null;
-  if (NATIVE_AU) { try { await nativeAuEnsure(t.key, blob); } catch (e) { plog("couldn't hand the part over: " + ((e && e.message) || e)); return null; } return t.key; }
+  if (NATIVE_AU) {
+    const nk = t.key + "." + auExt(t, blob);
+    try { await nativeAuEnsure(nk, blob); } catch (e) { plog("couldn't hand the part over: " + ((e && e.message) || e)); nativeAuFailed("handover"); return null; }
+    return nk;
+  }
   if (auObjURL) URL.revokeObjectURL(auObjURL);
   auObjURL = URL.createObjectURL(blob); return auObjURL;
 }
