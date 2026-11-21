@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "pip-3", items: [
+const WHATS_NEW = { id: "au-1", items: [
+  "<b>New audiobook player on iPhone:</b> the book is now played by the app itself, like a video app. It keeps going during calls, in the background and on the lock screen.",
   "<b>Keeps playing during calls:</b> like a video app, the book keeps going while you're on a Discord, FaceTime or phone call, and picks itself back up if something else stops it. Pausing it yourself, or taking your headphones out, still pauses it.",
   "<b>No more stops between parts:</b> about 10 minutes before a part ends, the next part downloads by itself (if it's in your account and not on this device yet), so the book keeps playing straight through.",
   "<b>Float the text over other apps:</b> on your iPhone, tap the pop-out button at the top of a book, or swipe up on the small player at the bottom. The page floats in a little window over your other apps, gray until it's read, then in color. Play and pause the book from the lock screen or Control Center. In the full player it's <b>Float text over other apps</b>.",
@@ -1469,7 +1470,89 @@ function renderSheet(){
 }
 
 /* ---------- audio ---------- */
-const au = $("#au");
+/* On iPhone the book is played by the app itself (like a video app), not by a web <audio> element:
+   WebKit sets the phone's audio up its own way, and during calls the book kept getting starved and cut.
+   This stands in for the <audio> element, so the rest of the app doesn't need to know the difference. */
+const NATIVE_AU = IOS;
+function nativeAudio(){
+  const et = new EventTarget(), fire = n => et.dispatchEvent(new Event(n));
+  const call = (act, o = {}) => Native.call({ op: "au", act, ...o });
+  const A = { _t: 0, _tAt: 0, _d: NaN, _paused: true, _ended: false, _rate: 1, _vol: 1, _key: "", readyState: 0, error: null, seeking: false,
+    defaultPlaybackRate: 1, preservesPitch: true, webkitPreservesPitch: true };
+  A.addEventListener = (n, f, o) => et.addEventListener(n, f, o);
+  A.removeEventListener = (n, f, o) => et.removeEventListener(n, f, o);
+  Object.defineProperties(A, {
+    currentTime: {
+      get(){ return (A._paused || A.readyState < 3) ? A._t : A._t + Math.max(0, Math.min(1, (performance.now() - A._tAt) / 1000)) * A._rate; },
+      set(v){ v = Math.max(0, +v || 0); A._t = v; A._tAt = performance.now(); A.seeking = true; call("seek", { t: v }).catch(() => {}); }
+    },
+    duration: { get(){ return A._d; } },
+    paused: { get(){ return A._paused; } },
+    ended: { get(){ return A._ended; } },
+    playbackRate: { get(){ return A._rate; }, set(v){ A._rate = +v || 1; call("rate", { r: A._rate }).catch(() => {}); fire("ratechange"); } },
+    volume: { get(){ return A._vol; }, set(v){ A._vol = Math.max(0, Math.min(1, +v)); call("volume", { v: A._vol }).catch(() => {}); } },
+    src: {
+      get(){ return A._key; },
+      set(k){
+        A._key = k; A._ended = false; A._paused = true; A.readyState = 0; A._d = NaN; A._t = 0; A.error = null; fire("emptied");
+        call("load", { key: k }).then(ok => { if (!ok) throw new Error("part not here"); })
+          .catch(e => { A.error = { code: 4, message: String((e && e.message) || e) }; fire("error"); });
+      }
+    }
+  });
+  A.removeAttribute = () => { A._key = ""; A._paused = true; A.readyState = 0; call("unload").catch(() => {}); fire("emptied"); };
+  A.play = () => {
+    if (!A._key) return Promise.reject(new Error("Nothing to play"));
+    const was = A._paused; A._paused = false; A._ended = false; A._tAt = performance.now();
+    if (was) fire("play");
+    return call("play").then(ok => { if (!ok) { A._paused = true; fire("pause"); throw new Error("NotAllowedError"); } });
+  };
+  A.pause = () => { const was = !A._paused; A._t = A.currentTime; A._paused = true; call("pause").catch(() => {}); if (was) fire("pause"); };
+  window.pkAu = m => {
+    const now = performance.now();
+    if (typeof m.t === "number" && m.t >= 0 && !A.seeking) { A._t = m.t; A._tAt = now; }
+    switch (m.ev) {
+      case "time": fire("timeupdate"); break;
+      case "loaded": A._d = m.d > 0 ? m.d : NaN; A.readyState = 4; fire("loadedmetadata"); fire("canplay"); break;
+      case "playing": A.readyState = 4; if (A._paused) { A._paused = false; fire("play"); } fire("playing"); break;
+      case "waiting": if (!A._paused) { A.readyState = 2; fire("waiting"); } break;
+      case "paused": if (!A._paused) { A._paused = true; fire("pause"); } break;   // not from the page: a call, headphones…
+      case "seeked": A.seeking = false; if (typeof m.t === "number") { A._t = m.t; A._tAt = now; } fire("seeked"); fire("timeupdate"); break;
+      case "ended": A._t = isFinite(A._d) ? A._d : A._t; A._ended = true; if (!A._paused) { A._paused = true; fire("pause"); } fire("ended"); break;
+      case "error": A.error = { code: m.code || 4, message: m.msg || "" }; fire("error"); break;
+      case "remote": auRemote(m); break;
+    }
+  };
+  return A;
+}
+// The lock screen, Control Center and headphone buttons.
+function auRemote(m){
+  plog("lock screen: " + m.cmd);
+  if (m.cmd === "play" || (m.cmd === "toggle" && au.paused)) { if (auBook) au.play().catch(() => {}); else playPauseAny(); }
+  else if (m.cmd === "pause" || m.cmd === "toggle") au.pause();
+  else if (m.cmd === "fwd") skipBy(skipSec());
+  else if (m.cmd === "back") skipBy(-skipSec());
+  else if (m.cmd === "next") goPart(1);
+  else if (m.cmd === "prev") goPart(-1);
+  else if (m.cmd === "seek" && typeof m.t === "number") { au.currentTime = m.t; saveAudioPos(true); updateTimes(); }
+}
+// Hand a part's file to the iPhone player (once; it keeps the last few).
+const auSent = {};
+async function nativeAuEnsure(key, blob){
+  if (auSent[key] === blob.size) return;
+  if (await Native.call({ op: "au", act: "has", key, size: blob.size })) { auSent[key] = blob.size; return; }
+  const CH = 3 * 1024 * 1024, big = blob.size > 8 * CH;
+  plog("handing part to the player: " + (blob.size / 1e6).toFixed(1) + " MB");
+  if (big) toast("Getting this part ready…", null, 60000);
+  try {
+    for (let off = 0; off < blob.size; off += CH) {
+      const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).slice(String(r.result).indexOf(",") + 1)); r.onerror = () => rej(r.error); r.readAsDataURL(blob.slice(off, off + CH)); });
+      await Native.call({ op: "au", act: "write", key, off, data: b64, done: off + CH >= blob.size });
+    }
+  } finally { if (big) clearToasts(); }
+  auSent[key] = blob.size;
+}
+const au = NATIVE_AU ? nativeAudio() : $("#au");
 let auBook = null, auSaveAt = 0, auObjURL = null;
 const fmt = s => { if (!isFinite(s)) return "–:––"; s = Math.floor(s); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60; return (h ? h + ":" + String(m).padStart(2,"0") : m) + ":" + String(x).padStart(2,"0"); };
 const AUDIO_EXT = /\.(mp3|m4a|m4b|mp4|aac|ogg|opus|oga|wav|webm|flac)$/i;
@@ -1757,6 +1840,7 @@ async function trackSrc(t){
   let blob = await idb.get(t.key);
   if (!blob && t.asset && Cloud.signedIn() && navigator.onLine !== false) { toast("Downloading this part…", null, 60000); try { blob = await fetchTrack(t); } catch { blob = null; } clearToasts(); }
   if (!blob) return null;
+  if (NATIVE_AU) { try { await nativeAuEnsure(t.key, blob); } catch (e) { plog("couldn't hand the part over: " + ((e && e.message) || e)); return null; } return t.key; }
   if (auObjURL) URL.revokeObjectURL(auObjURL);
   auObjURL = URL.createObjectURL(blob); return auObjURL;
 }
@@ -1775,6 +1859,7 @@ async function loadTrack(i, seek){
   return true;
 }
 function setMediaSession(){
+  if (NATIVE_AU && auBook) { const b = S.books[auBook.id], t = b?.audio?.tracks?.[auBook.track]; if (t) Native.call({ op: "au", act: "meta", title: t.name, artist: b.author || "", album: b.title }).catch(() => {}); return; }
   if (!("mediaSession" in navigator) || !auBook) return;
   const b = S.books[auBook.id], t = b?.audio?.tracks?.[auBook.track]; if (!t) return;
   try {
@@ -1826,10 +1911,11 @@ document.addEventListener("visibilitychange", () => plog(document.hidden ? "app 
 /* Keep playing through calls and other interruptions, like a video app does. If the audio stops and it
    wasn't you (or the sleep timer, or headphones coming out), start it again. */
 const AUK = { want: false, unplug: 0, tries: 0 };
-au.pause = function(){ AUK.want = false; return HTMLMediaElement.prototype.pause.call(this); };
-au.addEventListener("playing", () => { AUK.want = true; AUK.tries = 0; if (IOS) Native.call({ op: "keepAlive", on: true }).catch(() => {}); });
+const auPause0 = au.pause;
+au.pause = function(){ AUK.want = false; return auPause0.call(this); };
+au.addEventListener("playing", () => { AUK.want = true; AUK.tries = 0; if (IOS && !NATIVE_AU) Native.call({ op: "keepAlive", on: true }).catch(() => {}); });
 // the app stays awake while you want the book playing; let it sleep once you've paused or it's finished
-const auSleepOk = () => { if (IOS && !AUK.want) Native.call({ op: "keepAlive", on: false }).catch(() => {}); };
+const auSleepOk = () => { if (IOS && !NATIVE_AU && !AUK.want) Native.call({ op: "keepAlive", on: false }).catch(() => {}); };
 au.addEventListener("pause", () => setTimeout(auSleepOk, 0));
 au.addEventListener("ended", () => setTimeout(() => { if (au.paused) { AUK.want = false; auSleepOk(); } }, 3000));
 function auKeepGoing(){

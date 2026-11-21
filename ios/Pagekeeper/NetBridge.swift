@@ -8,7 +8,22 @@ import MediaPlayer
 /// and open the in-app browser. Called from JS as:
 ///   await window.webkit.messageHandlers.pk.postMessage({op: "text" | "file" | "done" | "browse", ...})
 final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
-    weak var webView: WKWebView? { didSet { setUpAudioEvents(); setUpPip() } }
+    weak var webView: WKWebView? { didSet { setUpAudioEvents(); setUpPip(); setUpNativeAudio() } }
+
+    // MARK: the audiobook player (see NativeAudio)
+    private let audio = NativeAudio()
+    private func setUpNativeAudio() {
+        audio.post = { [weak self] ev, extra in
+            var m = extra; m["ev"] = ev
+            for (k, v) in m { if let d = v as? Double, !d.isFinite { m[k] = -1 } }
+            guard let data = try? JSONSerialization.data(withJSONObject: m), let json = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async { self?.webView?.evaluateJavaScript("window.pkAu && window.pkAu(\(json))") }
+        }
+        audio.beforePlay = { [weak self] in
+            // a call (or another app) is using the sound: share it instead of cutting in
+            if AVAudioSession.sharedInstance().isOtherAudioPlaying { self?.setMixing(true) }
+        }
+    }
 
     // MARK: floating text window
     private let textPip = TextPiP()
@@ -234,6 +249,28 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
             let style: UIUserInterfaceStyle = mode == "light" ? .light : mode == "system" ? .unspecified : .dark
             webView?.window?.overrideUserInterfaceStyle = style
             replyHandler(true, nil)
+
+        case "au":
+            let key = body["key"] as? String ?? ""
+            switch body["act"] as? String ?? "" {
+            case "has":
+                replyHandler(audio.has(key, size: (body["size"] as? NSNumber)?.intValue ?? 0), nil)
+            case "write":
+                guard let b64 = body["data"] as? String, let data = Data(base64Encoded: b64) else { replyHandler(nil, "Bad data"); return }
+                do {
+                    try audio.write(key, offset: (body["off"] as? NSNumber)?.intValue ?? 0, data: data, done: (body["done"] as? Bool) ?? false)
+                    replyHandler(true, nil)
+                } catch { replyHandler(nil, error.localizedDescription) }
+            case "load": replyHandler(audio.load(key), nil)
+            case "unload": audio.unload(); replyHandler(true, nil)
+            case "play": replyHandler(audio.play(), nil)
+            case "pause": audio.pause(); replyHandler(true, nil)
+            case "seek": audio.seek((body["t"] as? NSNumber)?.doubleValue ?? 0); replyHandler(true, nil)
+            case "rate": audio.setRate((body["r"] as? NSNumber)?.floatValue ?? 1); replyHandler(true, nil)
+            case "volume": audio.setVolume((body["v"] as? NSNumber)?.floatValue ?? 1); replyHandler(true, nil)
+            case "meta": audio.setMeta(body); replyHandler(true, nil)
+            default: replyHandler(true, nil)   // "check": the native player is here
+            }
 
         case "pip":
             switch body["act"] as? String ?? "" {
