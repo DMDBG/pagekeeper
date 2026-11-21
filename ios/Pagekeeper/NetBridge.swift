@@ -8,7 +8,17 @@ import MediaPlayer
 /// and open the in-app browser. Called from JS as:
 ///   await window.webkit.messageHandlers.pk.postMessage({op: "text" | "file" | "done" | "browse", ...})
 final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
-    weak var webView: WKWebView? { didSet { setUpAudioEvents() } }
+    weak var webView: WKWebView? { didSet { setUpAudioEvents(); setUpPip() } }
+
+    // MARK: floating text window
+    private let textPip = TextPiP()
+    private func setUpPip() {
+        guard let web = webView else { return }
+        textPip.onEvent = { [weak self] ev in
+            DispatchQueue.main.async { self?.webView?.evaluateJavaScript("window.pkPip && window.pkPip('\(ev)')") }
+        }
+        DispatchQueue.main.async { [weak self] in self?.textPip.attach(to: web) }
+    }
 
     // MARK: calls and other audio
     // Like a video app, keep the book playing during a call (Discord, FaceTime, a phone call...):
@@ -224,6 +234,29 @@ final class NetBridge: NSObject, WKScriptMessageHandlerWithReply {
             let style: UIUserInterfaceStyle = mode == "light" ? .light : mode == "system" ? .unspecified : .dark
             webView?.window?.overrideUserInterfaceStyle = style
             replyHandler(true, nil)
+
+        case "pip":
+            switch body["act"] as? String ?? "" {
+            case "start":
+                guard TextPiP.supported else { replyHandler(false, nil); return }
+                if let p = body["playing"] as? Bool { textPip.setPlaying(p) }
+                textPip.start { ok in replyHandler(ok, nil) }
+            case "frame":
+                if let s = body["img"] as? String, let comma = s.firstIndex(of: ","),
+                   let data = Data(base64Encoded: String(s[s.index(after: comma)...])),
+                   let img = UIImage(data: data)?.cgImage {
+                    textPip.show(img)
+                }
+                replyHandler(true, nil)
+            case "state":
+                textPip.setPlaying((body["playing"] as? Bool) ?? false)
+                replyHandler(true, nil)
+            case "stop":
+                textPip.stop()
+                replyHandler(true, nil)
+            default:
+                replyHandler(TextPiP.supported, nil)
+            }
 
         case "keepAlive":
             // While a book plays, keep Pagekeeper itself awake in the background (see keepAwake below).

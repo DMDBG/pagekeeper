@@ -3161,9 +3161,35 @@ function setCaption(on){
 /* Text picture-in-picture (iPhone and browsers): swipe up on the player and the page floats over your
    other apps, gray until it's read, like the pop-out on the PC. iOS only lets videos float, so the text
    is drawn into a small silent video. Its play/pause button plays and pauses the book. */
-var PIP = { v: null, cv: null, ctx: null, on: false, timer: 0, y: null, key: "", lines: [], H0: 0, syncAt: 0, W: 720, H: 540 };
+var PIP = { v: null, cv: null, ctx: null, on: false, opening: false, timer: 0, y: null, key: "", lines: [], H0: 0, syncAt: 0, W: 720, H: 540, sendT: 0, sendTimer: 0 };
+// On iPhone the floating window is made by the app itself, like a video app's: the page only draws the
+// text and hands each picture over. (A hidden web video counts as a camera/call stream on iOS and kept
+// interrupting the audiobook while Pagekeeper was on screen.)
+const PIP_NATIVE = IOS;
+function pipCanvas(){
+  if (PIP.cv) return;
+  const cv = document.createElement("canvas"); cv.width = PIP.W; cv.height = PIP.H;
+  PIP.cv = cv; PIP.ctx = cv.getContext("2d");
+}
+function pipMark(){ const rp = $("#rPop"); if (rp && IOS) rp.setAttribute("aria-pressed", PIP.on); }
+function pipSend(){
+  if (!PIP_NATIVE || !(PIP.on || PIP.opening) || !PIP.cv) return;
+  const now = performance.now(), wait = 80 - (now - PIP.sendT);
+  if (wait > 0) { if (!PIP.sendTimer) PIP.sendTimer = setTimeout(() => { PIP.sendTimer = 0; pipSend(); }, wait); return; }
+  PIP.sendT = now;
+  return Native.call({ op: "pip", act: "frame", img: PIP.cv.toDataURL("image/jpeg", 0.85) }).catch(() => {});
+}
+window.pkPip = ev => {
+  plog("floating text " + ev);
+  if (ev === "opened") { PIP.on = true; PIP.opening = false; PIP.lastPlay = null; pipMark(); pipRun(); pipSync(); }
+  else if (ev === "closed" || ev === "failed") { PIP.on = false; PIP.opening = false; pipMark(); pipRun(); if (ev === "failed") pipFallback(); }
+  else if (ev === "play" || ev === "pause") { if (pipPlaying() !== (ev === "play")) playPauseAny(); setTimeout(pipSync, 400); }
+  else if (ev === "back" || ev === "fwd") skipBy(ev === "back" ? -skipSec() : skipSec());
+};
 function pipSupported(){
-  if (TAURI || !HTMLCanvasElement.prototype.captureStream) return false;
+  if (TAURI) return false;
+  if (PIP_NATIVE) return true;
+  if (!HTMLCanvasElement.prototype.captureStream) return false;
   const v = document.createElement("video");
   return !!(document.pictureInPictureEnabled || (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode("picture-in-picture")));
 }
@@ -3171,17 +3197,16 @@ const pipPlaying = () => capNow.speaking || !!(auBook && !au.paused);
 // Made ahead of time (when your finger touches the player), so the swipe can open it straight away.
 function pipPrepare(){
   if (!pipSupported()) return null;
+  if (PIP_NATIVE) { pipCanvas(); return true; }
   if (PIP.v) { if (PIP.v.paused) { PIP.syncAt = Date.now(); PIP.v.play().catch(() => {}); pipRun(); } return PIP.v; }
-  const cv = document.createElement("canvas"); cv.width = PIP.W; cv.height = PIP.H;
-  PIP.cv = cv; PIP.ctx = cv.getContext("2d"); pipDraw();
+  pipCanvas(); pipDraw(); const cv = PIP.cv;
   const v = document.createElement("video");
   v.muted = true; v.playsInline = true; v.setAttribute("playsinline", ""); v.setAttribute("muted", ""); v.setAttribute("aria-hidden", "true");
   v.style.cssText = "position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:.01;pointer-events:none;z-index:-1";
   v.srcObject = cv.captureStream(30);
   document.body.appendChild(v);
-  const mark = () => { const rp = $("#rPop"); if (rp && IOS) rp.setAttribute("aria-pressed", PIP.on); };
-  const on = () => { if (!PIP.on) { PIP.on = true; pipRun(); pipSync(); mark(); } };
-  const off = () => { if (PIP.on) { PIP.on = false; PIP.v.pause(); pipRun(); mark(); } };
+  const on = () => { if (!PIP.on) { PIP.on = true; pipRun(); pipSync(); pipMark(); } };
+  const off = () => { if (PIP.on) { PIP.on = false; PIP.v.pause(); pipRun(); pipMark(); } };
   v.addEventListener("enterpictureinpicture", on); v.addEventListener("leavepictureinpicture", off);
   ["pause", "play", "waiting", "stalled"].forEach(ev => v.addEventListener(ev, () => plog("floating text video " + ev)));
   v.addEventListener("enterpictureinpicture", () => plog("floating text opened")); v.addEventListener("leavepictureinpicture", () => plog("floating text closed"));
@@ -3197,18 +3222,28 @@ function pipPrepare(){
 }
 function pipRun(){
   clearTimeout(PIP.timer); PIP.timer = 0;
-  if (!(PIP.on || (PIP.v && !PIP.v.paused))) return;
+  if (!(PIP.on || PIP.opening || (PIP.v && !PIP.v.paused))) return;
   // Quick frames only while the text is gliding up to the next line; otherwise a light check 8 times a second.
   const tick = () => { const moving = pipDraw(); PIP.timer = setTimeout(tick, moving ? 40 : 125); };
   PIP.timer = setTimeout(tick, 0);
 }
 // Keep the floating window's button showing the same as the player.
 function pipSync(){
+  if (PIP_NATIVE) { const p = pipPlaying(); if (PIP.on && p !== PIP.lastPlay) { PIP.lastPlay = p; Native.call({ op: "pip", act: "state", playing: p }).catch(() => {}); } return; }
   if (!PIP.on || !PIP.v) return;
   if (PIP.v.paused) PIP.v.play().catch(() => {});
 }
 async function pipOpen(){
   if (PIP.on) return;
+  if (PIP_NATIVE) {
+    pipCanvas(); PIP.opening = true; PIP.sig = ""; PIP.y = null; pipDraw(); PIP.sendT = 0; await pipSend();
+    let ok = false;
+    try { ok = await Native.call({ op: "pip", act: "start", playing: pipPlaying() }); } catch (e) { plog("floating text couldn't start: " + ((e && e.message) || e)); }
+    if (!ok) { PIP.opening = false; pipRun(); pipFallback(); return; }
+    pipRun();
+    if (!prefs.get("pipTold")) { prefs.set("pipTold", true); toast("The text now floats. Go to any other app and it stays on top. Pinch it to resize, or drag it to a side to tuck it away."); }
+    return;
+  }
   const v = pipPrepare();
   if (!v) { pipFallback(); return; }
   try {
@@ -3219,6 +3254,7 @@ async function pipOpen(){
   } catch (e) { if (PIP.v) PIP.v.pause(); pipRun(); pipFallback(); }
 }
 function pipClose(){
+  if (PIP_NATIVE) { Native.call({ op: "pip", act: "stop" }).catch(() => {}); return; }
   if (!PIP.v) return;
   try { if (document.pictureInPictureElement === PIP.v) document.exitPictureInPicture(); else if (PIP.v.webkitPresentationMode === "picture-in-picture") PIP.v.webkitSetPresentationMode("inline"); } catch {}
 }
@@ -3297,6 +3333,7 @@ function pipDraw(){
   ctx.fillText(it === info ? it : it.trimEnd() + "…", pad, H - foot / 2);
   if (!pipPlaying()) { ctx.globalAlpha = 0.8; ctx.fillText("Paused", W - pad - ctx.measureText("Paused").width, H - foot / 2); }
   ctx.globalAlpha = 1;
+  pipSend();
   return moving;
 }
 function pipAlpha(c, a){
@@ -3316,7 +3353,7 @@ function pipAlpha(c, a){
     if (!live) return; live = false;
     const t = e.changedTouches[0], dy = sy - t.clientY, dx = Math.abs(t.clientX - sx);
     if (dy > 40 && dy > dx * 1.4) { e.preventDefault(); pipOpen(); }
-    else if (PIP.v && !PIP.on && !PIP.v.paused) { PIP.syncAt = Date.now(); PIP.v.pause(); pipRun(); }
+    else if (PIP.v && !PIP.on && !PIP.v.paused) { PIP.syncAt = Date.now(); PIP.v.pause(); pipRun(); }   // (web version only)
   });
 })();
 if (TAURI && TAURI.event) {
