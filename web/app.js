@@ -1794,7 +1794,7 @@ async function togglePlay(){
   stopReadAloud();
   const b = S.books[S.cur]; if (!b?.audio?.tracks?.length) return;
   if (!auBook || auBook.id !== S.cur) { const ok = await loadTrack(b.audio.track || 0, b.audio.time || 0); if (!ok) return; }
-  if (au.paused) { try { await au.play(); } catch { toast("This audio file can't be played here."); } } else au.pause();
+  if (au.paused) { try { await au.play(); } catch (e) { plog("play refused: " + ((e && e.name) || e)); auRecover("play refused"); } } else au.pause();
 }
 function saveAudioPos(force){
   if (!auBook || !S.books[auBook.id]) return;
@@ -1842,6 +1842,43 @@ au.addEventListener("pause", () => {
   // Not a pause from you: try again shortly, then a few more times while the call settles.
   [400, 1500, 4000, 10000].forEach(ms => setTimeout(auKeepGoing, ms));
 });
+/* If the audio runs out of data (stuck "waiting") or can't read its file, check this part on the device:
+   read it again, and if it's broken or the wrong size, download it again from your account, then carry on
+   from the same spot. Everything it finds goes in the playback log. */
+let auStuckTimer = 0;
+au.addEventListener("waiting", () => { clearTimeout(auStuckTimer); auStuckTimer = setTimeout(() => { if (AUK.want && au.readyState < 3) auRecover("stuck waiting"); }, 3000); });
+au.addEventListener("playing", () => clearTimeout(auStuckTimer));
+au.addEventListener("error", () => { if (auBook) auRecover("error " + (au.error ? au.error.code : "")); });
+async function auRecover(why){
+  if (!auBook || AUK.fixing) return;
+  if (Date.now() - (AUK.fixedAt || 0) < 8000) { plog("still stuck after a fix (" + why + ")"); return; }
+  AUK.fixing = true; AUK.fixedAt = Date.now();
+  const id = auBook.id, ti = auBook.track, b = S.books[id], t = b?.audio?.tracks?.[ti];
+  const at = au.currentTime || 0, wasPlaying = AUK.want || why.startsWith("error");
+  plog("audio " + why + ", checking part " + (ti + 1));
+  try {
+    if (!t) return;
+    let blob = await idb.get(t.key), ok = !!blob;
+    plog(blob ? "part " + (ti + 1) + " on device: " + (blob.size / 1e6).toFixed(2) + " MB" + (t.size ? " (should be " + (t.size / 1e6).toFixed(2) + " MB)" : "") + ", " + (blob.type || "no type") : "part " + (ti + 1) + " is missing from the device");
+    if (blob && t.size && Math.abs(blob.size - t.size) > 4096) { ok = false; plog("wrong size: the saved copy is broken"); }
+    if (ok) {
+      // try reading the file around where it stopped, and at its end
+      try {
+        const off = Math.max(0, Math.min(blob.size - 65536, Math.floor(blob.size * (at / (au.duration || 1)))));
+        await blob.slice(off, off + 65536).arrayBuffer(); await blob.slice(Math.max(0, blob.size - 65536)).arrayBuffer();
+        plog("the saved copy reads fine");
+      } catch (e) { ok = false; plog("the saved copy can't be read: " + ((e && e.name) || e)); }
+    }
+    if (!ok && t.asset && Cloud.signedIn() && navigator.onLine !== false) {
+      plog("downloading part " + (ti + 1) + " again"); toast("This part's copy on your phone was broken. Downloading it again…", null, 60000);
+      try { await idb.del(t.key); } catch {}
+      S.haveLocal[t.key] = false; await fetchTrack(t); clearToasts(); plog("downloaded part " + (ti + 1) + " again");
+    } else if (!ok) { plog("can't fix it here: " + (t.asset ? "no connection or not signed in" : "this part isn't in your account")); toast(t.asset ? "This part's copy on your phone is broken. Connect to the internet and it downloads again." : "This part's copy on your phone is broken. Send it again from your PC, or add the file again."); return; }
+    // load it fresh and carry on from the same spot
+    if (auBook && auBook.id === id && auBook.track === ti && await loadTrack(ti, at)) { plog("reloaded part " + (ti + 1) + " at " + at.toFixed(1) + "s"); if (wasPlaying) au.play().catch(e => plog("couldn't start again: " + ((e && e.name) || e))); }
+  } catch (e) { clearToasts(); plog("fix failed: " + ((e && e.message) || e)); }
+  finally { AUK.fixing = false; }
+}
 window.pkAudio = what => {
   plog("iPhone says: " + what);
   if (what === "unplugged") { AUK.unplug = Date.now(); AUK.want = false; return; }
