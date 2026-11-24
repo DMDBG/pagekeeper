@@ -288,6 +288,25 @@ fn pk_caption_size(app: AppHandle, w: f64, h: f64) -> Result<(), String> {
     win.set_size(tauri::LogicalSize::new(w, h)).map_err(|e| e.to_string())
 }
 
+/// Keys that work even while another app (a game) is in front: each (shortcut, action) pair sends
+/// "pk-hotkey" with the action to the main window. Returns the shortcuts Windows wouldn't give us.
+#[tauri::command]
+fn pk_hotkeys(app: AppHandle, keys: Vec<(String, String)>) -> Result<Vec<String>, String> {
+    let gs = app.global_shortcut();
+    gs.unregister_all().map_err(|e| e.to_string())?;
+    let mut failed = Vec::new();
+    for (accel, action) in keys {
+        let act = action.clone();
+        let ok = gs.on_shortcut(accel.as_str(), move |app, _shortcut, event| {
+            if event.state == ShortcutState::Pressed {
+                let _ = app.emit_to("main", "pk-hotkey", act.clone());
+            }
+        });
+        if ok.is_err() { failed.push(accel); }
+    }
+    Ok(failed)
+}
+
 /// The play/pause key, working even while another app is in front. None turns it off.
 #[tauri::command]
 fn pk_hotkey(app: AppHandle, keys: Option<String>) -> Result<(), String> {
@@ -322,7 +341,7 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption, pk_caption_size, pk_hotkey,
+        .invoke_handler(tauri::generate_handler![pk_text, pk_file, pk_read, pk_done, pk_browse, pk_caption, pk_caption_size, pk_hotkey, pk_hotkeys,
             sync::pk_sync_status, sync::pk_sync_stop, sync::pk_sync_model, sync::pk_put_begin, sync::pk_put_chunk, sync::pk_transcribe, sync::pk_check, sync::pk_sync_release,
             share::pk_share_start, share::pk_share_stop, share::pk_share_has, share::pk_share_begin, share::pk_share_chunk, share::pk_share_list, update::pk_install_update, ai::pk_http])
         .run(tauri::generate_context!())

@@ -203,6 +203,9 @@
 .pf-prog{flex:1;height:3px;border-radius:2px;background:color-mix(in srgb,var(--fg) 20%,transparent);overflow:hidden}
 .pf-prog i{display:block;height:100%;background:var(--fg)}
 .pf-paused{font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.pf-lost{all:unset;cursor:pointer;font:600 11px system-ui,-apple-system,"Segoe UI",sans-serif;padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--fg) 16%,transparent);color:var(--fg)}
+.pf-lost:hover{background:color-mix(in srgb,var(--fg) 26%,transparent)}
+.pf.locked .pf-lost{display:none}
 .pf .hint{font-size:15px;opacity:.75}`;
   let fstyled = false;
   function mountFocus(host, opts = {}){
@@ -211,11 +214,12 @@
     const dr = opts.drag ? " data-tauri-drag-region" : "";
     const root = document.createElement("div"); root.className = "pf";
     if (opts.drag) root.setAttribute("data-tauri-drag-region", "");
-    root.innerHTML = `<div class="pf-prev"${opts.drag ? "" : ""}></div><div class="pf-cur"${dr}></div><div class="pf-next"${dr}></div><div class="pf-foot"${dr}><span class="pf-paused"${dr}></span><span class="pf-info"${dr}></span><span class="pf-prog"${dr}><i${dr}></i></span></div>`;
+    root.innerHTML = `<div class="pf-prev"${opts.drag ? "" : ""}></div><div class="pf-cur"${dr}></div><div class="pf-next"${dr}></div><div class="pf-foot"${dr}><button class="pf-lost" title="Go back a couple of sentences">↺ Lost my place</button><span class="pf-paused"${dr}></span><span class="pf-info"${dr}></span><span class="pf-prog"${dr}><i${dr}></i></span></div>`;
     host.append(root);
     const prev = root.querySelector(".pf-prev"), cur = root.querySelector(".pf-cur"), next = root.querySelector(".pf-next");
     let key = null, oldTimer = 0, fo = null;
     // tap the last sentence: hear it again
+    root.querySelector(".pf-lost").addEventListener("click", e => { e.stopPropagation(); onCmd("lost"); });
     prev.addEventListener("click", e => { e.stopPropagation(); if (fo && fo.prevOff != null) onCmd("seek", { off: fo.prevOff, key: fo.pkey }); });
     return {
       root,
@@ -228,7 +232,9 @@
         root.classList.toggle("gray", p.gray !== false);
         root.classList.toggle("outline", (p.plate ?? .7) < .4);
         const foot = root.querySelector(".pf-foot");
-        root.querySelector(".pf-paused").textContent = (p.audio || p.speaking || p.canRead) && !p.playing ? "Paused" : "";
+        root.querySelector(".pf-paused").textContent = (p.audio || p.speaking || p.canRead) && !p.playing ? "Paused" : p.slow ? "Slower" : "";
+        root.style.fontFamily = p.font || "";
+        root.classList.toggle("locked", !!p.locked);
         root.querySelector(".pf-info").textContent = p.showInfo === false ? "" : (p.info || "");
         if (!fo) { key = null; prev.textContent = next.textContent = ""; cur.innerHTML = `<span class="hint">${esc(p.hint || "Open a book in Pagekeeper.")}</span>`; foot.querySelector("i").style.width = "0"; return; }
         const changed = fo.key !== key;

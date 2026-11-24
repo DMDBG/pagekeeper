@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "focus-1", items: [
+const WHATS_NEW = { id: "focus-2", items: [
+  "<b>More for reading over games:</b> in Focus, tap <b>↺ Lost my place</b> to go back a couple of sentences, or <b>Slow down</b> to hear this sentence and the next a little slower. Pick a font made for quick reading (Extra clear, Rounded, Book). On the PC, clicks now go straight through Focus to your game, and new keys work in any app: Ctrl+Alt+H show or hide, Ctrl+Alt+B lost my place, Ctrl+Alt+S slow down, Ctrl+Alt+L lock or unlock.",
   "<b>Focus pop-out, for reading over a game:</b> under <b>Aa → Pop-out shows</b>, pick <b>Focus</b>. One big sentence with a bright marker on the word being read, so your eyes find it the moment you look back. The last sentence stays above for a few seconds (tap it to hear it again), the next one waits below, and you set how strong the see-through backing is. Works in the PC pop-out, in Pagekeeper, and in the iPhone floating window.",
   "<b>New audiobook player on iPhone:</b> the book is now played by the app itself, like a video app. It keeps going during calls, in the background and on the lock screen.",
   "<b>Keeps playing during calls:</b> like a video app, the book keeps going while you're on a Discord, FaceTime or phone call, and picks itself back up if something else stops it. Pausing it yourself, or taking your headphones out, still pauses it.",
@@ -808,7 +809,9 @@ function renderSettings(el){
         ${prefs.get("keyPlay") ? `<button class="btn ghost" id="keyReset">Use Space</button>` : ""}</div>
       <p class="note" style="margin:0">Starts and pauses the audiobook or Read aloud${IOS ? " (with a keyboard connected to your iPhone)" : ""}.</p>
       ${TAURI ? `<label class="check"><input type="checkbox" id="keyGlobal" ${prefs.get("keyGlobal") ? "checked" : ""}> Also works when you're in another app</label>
-      <p class="note" style="margin:0">For that, the key needs Ctrl, Alt or Shift with it (like Ctrl + Shift + Space), or use an F key, so it doesn't get in the way of typing elsewhere.</p>` : ""}
+      <p class="note" style="margin:0">For that, the key needs Ctrl, Alt or Shift with it (like Ctrl + Shift + Space), or use an F key, so it doesn't get in the way of typing elsewhere.</p>
+      <label class="check"><input type="checkbox" id="keyGame" ${prefs.get("keyGame") !== false ? "checked" : ""}> Pop-out keys for gaming (work in any app)</label>
+      <p class="note" style="margin:0"><kbd>Ctrl + Alt + H</kbd> show or hide the pop-out · <kbd>Ctrl + Alt + B</kbd> lost my place (back a couple of sentences) · <kbd>Ctrl + Alt + S</kbd> slow down for this sentence · <kbd>Ctrl + Alt + L</kbd> lock or unlock the pop-out (clicks go through)</p>` : ""}
     </div>
     <div class="panel">
       <h3>This device</h3>
@@ -866,6 +869,7 @@ function renderSettings(el){
     document.addEventListener("keydown", grab, true);
   };
   const kr = $("#keyReset"); if (kr) kr.onclick = () => { prefs.set("keyPlay", undefined); if (prefs.get("keyGlobal")) prefs.set("keyGlobal", false); setGlobalKey(); renderSettings(el); };
+  const kgm = $("#keyGame"); if (kgm) kgm.onchange = () => { prefs.set("keyGame", kgm.checked); setGlobalKey(); };
   const kg = $("#keyGlobal"); if (kg) kg.onchange = () => {
     if (kg.checked && !globalOk(keyPlay())) { kg.checked = false; toast("Pick a key with Ctrl, Alt or Shift first (or an F key), then turn this on.", null, 6000); return; }
     prefs.set("keyGlobal", kg.checked); setGlobalKey();
@@ -1423,7 +1427,9 @@ function renderSheet(){
         ${capMode() === "focus" ? `<div class="capplate"><span>Backing</span><input type="range" id="capPlate" min="0" max="100" step="5" value="${Math.round(capPlate() * 100)}" aria-label="How strong the backing behind the text is"><b>${Math.round(capPlate() * 100)}%</b></div>
         <div class="seg" style="margin-top:8px"><button data-capx="hlword" aria-pressed="${prefs.get("capHlWord") !== false}">Mark the word</button><button data-capx="catchup" aria-pressed="${prefs.get("capCatch") !== false}">Last sentence</button><button data-capx="shownext" aria-pressed="${prefs.get("capNext") !== false}">What's next</button></div>
         <div class="seg" style="margin-top:8px"><button data-capx="bold" aria-pressed="${prefs.get("capBold") !== false}">Bold text</button><button data-capx="gray" aria-pressed="${prefs.get("capGray") !== false}">Dim unread words</button><button data-capx="smaller" aria-label="Smaller focus text">A−</button><button data-capx="bigger" aria-label="Larger focus text">A+</button></div>
-        <span class="note">Focus is made for reading over a game or video: one sentence, big, with a bright marker on the word being read so your eyes find it the moment you look back. The last sentence stays above for a few seconds (${TAURI ? "click" : "tap"} it to hear it again) and the next one waits below. Turn the backing up over busy, bright scenes.</span>` : ""}
+        <div class="seg" style="margin-top:8px">${Object.entries(CAP_FONTS).map(([k, [l, ff]]) => `<button data-capx="font-${k}" aria-pressed="${capFont() === k}" style="font-family:${esc(ff)}">${l}</button>`).join("")}</div>
+        <div class="seg" style="margin-top:8px"><button data-capx="lost">Lost my place</button><button data-capx="slow" aria-pressed="${SLOW.on}">Slow down</button>${TAURI ? `<button data-capx="lock" aria-pressed="${capLocked()}">Clicks go through</button>` : ""}</div>
+        <span class="note">Focus is made for reading over a game or video: one sentence, big, with a bright marker on the word being read so your eyes find it the moment you look back. The last sentence stays above for a few seconds (${TAURI ? "click" : "tap"} it to hear it again) and the next one waits below. Turn the backing up over busy, bright scenes. Lost my place goes back a couple of sentences; Slow down plays this sentence and the next a little slower.${TAURI ? " On the PC, clicks go through Focus to your game; Ctrl + Alt + L unlocks it to move it, and Ctrl + Alt + H shows or hides it." : ""}</span>` : ""}
         ${capMode() === "page" ? `<div class="seg" style="margin-top:8px">${Object.entries(CAP_SIZES).map(([k, [, , l]]) => `<button data-capsize="${k}" aria-pressed="${(prefs.get("capPSz") || "tablet") === k}">${l}</button>`).join("")}</div>
         <div class="seg" style="margin-top:8px"><button data-capx="gray" aria-pressed="${prefs.get("capGray") !== false}">Gray until it's read</button><button data-capx="pclear" aria-pressed="${prefs.get("capPClear") === true}">No background</button></div>` : ""}
         <span class="note">The whole page: words are gray until they're read, then come into color. ${TAURI ? "Double-click" : "Double-tap"} a word to move the audiobook or read-aloud to it. Drag it by its top bar${TAURI ? ", and drag its edges to resize" : ""}. For audiobooks, turn on Follow in the player.</span></div>
@@ -1448,7 +1454,7 @@ function renderSheet(){
         </div></div>
       <div class="field"><label>Pop-out extras</label>
         <div class="seg">
-          <button data-capx="lock" aria-pressed="${!!prefs.get("capLock")}">${prefs.get("capLock") ? "Unlock pop-out" : "Lock in place"}</button>
+          <button data-capx="lock" aria-pressed="${capLocked()}">${capLocked() ? "Unlock pop-out" : "Lock in place"}</button>
           <button data-capx="autohide" aria-pressed="${!!prefs.get("capHide")}">Hide when paused</button>
           <button data-capx="info" aria-pressed="${prefs.get("capInfo") !== false}">Chapter and time left</button>
         </div>
@@ -2374,7 +2380,7 @@ function updateDock(){
       <div class="chips">${SPEEDS.map(x => `<button class="chip" data-rate="${x}" aria-pressed="${x === r}">${rateTxt(x)}</button>`).join("")}</div>${label ? `<span class="note">${label}</span>` : ""}</div>`;
   const volRow = `<div class="pl-row"><label>Volume</label><button class="ib" id="auMute" aria-label="Mute">${ICON.vol}</button>
       <input type="range" class="scrub vol" id="auVol" min="0" max="1" step="0.01" value="${shownVol() == null ? 1 : shownVol()}" aria-label="Volume"></div>`;
-  const popRow = `<div class="pl-row"><label>Pop-out</label>${pipSupported() ? `<button class="btn primary" id="plPip">${PIP.on ? "Stop floating text" : "Float text over other apps"}</button>` : ""}<button class="btn" id="plPop">${prefs.get("capOn") ? "Hide pop-out text" : "Show pop-out text"}</button>${prefs.get("capOn") && prefs.get("capLock") ? `<button class="btn primary" id="plUnlock">Unlock pop-out</button>` : ""}<span class="note">Right-click it for more. Colors and style under Aa.</span></div>`;
+  const popRow = `<div class="pl-row"><label>Pop-out</label>${pipSupported() ? `<button class="btn primary" id="plPip">${PIP.on ? "Stop floating text" : "Float text over other apps"}</button>` : ""}<button class="btn" id="plPop">${prefs.get("capOn") ? "Hide pop-out text" : "Show pop-out text"}</button>${prefs.get("capOn") && capLocked() ? `<button class="btn primary" id="plUnlock">Unlock pop-out</button>` : ""}<span class="note">Right-click it for more. Colors and style under Aa.</span></div>`;
 
   if (mode === "tts") {
     const n = TTS.count || document.querySelectorAll(".page [data-s]").length || 1;
@@ -3124,14 +3130,65 @@ function setGlobalKey(){
   if (!TAURI) return;
   const k = keyPlay();
   const accel = prefs.get("keyGlobal") && globalOk(k) ? [k.ctrl && "Ctrl", k.alt && "Alt", k.shift && "Shift", k.meta && "Super", k.code].filter(Boolean).join("+") : null;
-  TAURI.core.invoke("pk_hotkey", { keys: accel }).catch(e => { console.warn(e); if (accel) toast("Windows wouldn't let Pagekeeper use that key in other apps. Another program may already use it; try a different one.", null, 7000); });
+  const keys = [];
+  if (accel) keys.push([accel, "play"]);
+  // keys for the pop-out while you're in a game
+  if (prefs.get("keyGame") !== false) keys.push(["Ctrl+Alt+H", "show"], ["Ctrl+Alt+B", "lost"], ["Ctrl+Alt+S", "slow"], ["Ctrl+Alt+L", "lock"]);
+  TAURI.core.invoke("pk_hotkeys", { keys }).then(failed => {
+    if (failed && failed.includes(accel)) toast("Windows wouldn't let Pagekeeper use that key in other apps. Another program may already use it; try a different one.", null, 7000);
+    if (failed && failed.length) plog("hotkeys Windows wouldn't give us: " + failed.join(", "));
+  }).catch(e => console.warn(e));
 }
+/* "Lost my place": go back a couple of sentences (or 10 seconds) and keep playing, so you can pick the
+   thread up again after looking away. */
+function capLost(){
+  plog("lost my place");
+  if (S.view === "reader" && S.cur && S.reading && playerMode() === "tts") { ttsJumpTo(Math.max(0, TTS.idx - 2)); return; }
+  const fo = capFocus();
+  const off = fo ? (fo.prev2Off ?? fo.prevOff) : null;
+  if (off != null && auBook && auBook.id === S.cur && S.books[S.cur]?.audio?.tracks?.length) {
+    capSeek({ off, key: fo.pkey }).then(() => { if (au.paused) au.play().catch(() => {}); });
+    toast("Back a little. Here's where you were.", null, 2500);
+  } else if (auBook) { skipBy(-10); if (au.paused) au.play().catch(() => {}); toast("Back 10 seconds.", null, 2000); }
+}
+/* "Slow down": the audiobook plays a bit slower until the sentence after this one starts, then goes back. */
+var SLOW = { on: false, rate: 1, key: null, until: 0, timer: 0 };
+function capSlow(){
+  if (!auBook) { toast("Slow down works while an audiobook plays.", null, 3000); return; }
+  if (SLOW.on) { slowEnd(); return; }
+  const fo = capFocus();
+  SLOW.on = true; SLOW.rate = au.playbackRate || 1; SLOW.key = fo ? fo.key : null; SLOW.moved = 0;
+  au.playbackRate = Math.max(0.5, Math.round(SLOW.rate * 0.8 * 20) / 20);
+  clearTimeout(SLOW.timer); SLOW.timer = setTimeout(slowEnd, 25000);   // never stays slow for long
+  plog("slowing down to " + au.playbackRate + "x"); capSend();
+}
+function slowEnd(){
+  if (!SLOW.on) return;
+  SLOW.on = false; clearTimeout(SLOW.timer);
+  au.playbackRate = SLOW.rate; plog("back to " + SLOW.rate + "x"); capSend();
+}
+au.addEventListener("timeupdate", () => {
+  if (!SLOW.on) return;
+  const fo = capFocus(); if (!fo || fo.key === SLOW.key) return;
+  SLOW.key = fo.key; if (++SLOW.moved >= 2) slowEnd();   // the hard sentence and the next one, then normal speed
+});
+au.addEventListener("pause", () => slowEnd());
 function playPauseAny(){
   if (S.view === "reader" && S.cur) {
     if (playerMode() === "tts") ttsPlayPause(); else togglePlay();
   } else if (auBook) { if (au.paused) au.play().catch(() => {}); else au.pause(); }
 }
-if (TAURI) { TAURI.event.listen("pk-hotkey", () => playPauseAny()); setTimeout(setGlobalKey, 0); }
+if (TAURI) {
+  TAURI.event.listen("pk-hotkey", e => {
+    const a = (e && e.payload) || "play";
+    if (a === "play") playPauseAny();
+    else if (a === "show") { setCaption(!prefs.get("capOn")); if (S.sheet === "type") renderSheet(); }
+    else if (a === "lost") capLost();
+    else if (a === "slow") capSlow();
+    else if (a === "lock") capCmd("lock");
+  });
+  setTimeout(setGlobalKey, 0);
+}
 
 /* ---------- pop-out text ----------
    Windows app: a borderless, always-on-top window you drag anywhere on screen.
@@ -3156,12 +3213,19 @@ function capPayload(){
   const page = capMode() === "page", focus = capMode() === "focus";
   return { ...capCfg(), ...(page ? { size: prefs.get("capPSize") || 19, mode: "page", pg: capPage(), gray: prefs.get("capGray") !== false, pclear: prefs.get("capPClear") === true, canRead: S.view === "reader" && !!S.cur }
     : focus ? { size: prefs.get("capFSize") || 30, mode: "focus", fo: capFocus(), plate: capPlate(), bold: prefs.get("capBold") !== false, gray: prefs.get("capGray") !== false,
-        hlWord: prefs.get("capHlWord") !== false, catchup: prefs.get("capCatch") !== false, shownext: prefs.get("capNext") !== false, canRead: S.view === "reader" && !!S.cur }
-    : { mode: "line" }), text, hint, info: capInfo(), locked: !!prefs.get("capLock"), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
+        hlWord: prefs.get("capHlWord") !== false, catchup: prefs.get("capCatch") !== false, shownext: prefs.get("capNext") !== false, canRead: S.view === "reader" && !!S.cur,
+        font: CAP_FONTS[capFont()][1], slow: !!(SLOW && SLOW.on) }
+    : { mode: "line" }), text, hint, info: capInfo(), locked: capLocked(), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
 }
 /* The whole page in the pop-out: its sentences, and how far into the page the audio or read-aloud is
    (-1: not known, so it's all in color). */
 const capMode = () => { const m = prefs.get("capMode"); return m === "page" || m === "focus" ? m : "line"; };
+// Focus on the PC: clicks go straight through to the game by default (a separate setting from "Lock in place").
+const capLocked = () => TAURI && capMode() === "focus" ? prefs.get("capFThru") !== false : !!prefs.get("capLock");
+// Fonts for the Focus view: chosen for reading at a glance.
+const CAP_FONTS = { sans: ["Standard", 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'], clear: ["Extra clear", 'Verdana, Tahoma, "DejaVu Sans", sans-serif'],
+  rounded: ["Rounded", 'ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", "Trebuchet MS", system-ui, sans-serif'], book: ["Book", 'Georgia, "Iowan Old Style", "Palatino Linotype", serif'] };
+const capFont = () => CAP_FONTS[prefs.get("capFont")] ? prefs.get("capFont") : "sans";
 const capPlate = () => { const v = prefs.get("capPlate"); return typeof v === "number" ? v : 0.7; };
 /* Focus: the sentence being read, where in it the reading is, the word to mark, and the sentences
    either side (for the catch-up line above and the next one below). */
@@ -3182,7 +3246,7 @@ function capFocus(){
   const at = pg.pos >= 0 ? Math.max(0, Math.min(cur.length, pg.pos - st - lead)) : -1;
   let w = null;
   if (at >= 0) { const re = /\S+/g; let m; while ((m = re.exec(cur))) if (m.index + m[0].length > at) { w = [m.index, m.index + m[0].length]; break; } }
-  return { key: pg.key + "|" + i, cur, at, w, prev: i > 0 ? list[i - 1][1].trim() : "", prevOff: i > 0 ? list[i - 1][0] : null,
+  return { key: pg.key + "|" + i, cur, at, w, prev: i > 0 ? list[i - 1][1].trim() : "", prevOff: i > 0 ? list[i - 1][0] : null, prev2Off: i > 1 ? list[i - 2][0] : null,
     next: i + 1 < list.length ? list[i + 1][1].trim() : "", pct: pg.total ? Math.max(0, pg.pos) / pg.total : 0, pkey: pg.key };
 }
 const CAP_SIZES = { phone: [390, 720, "Phone"], tablet: [640, 860, "Tablet"], book: [540, 760, "Book page"], wide: [940, 560, "Wide"] };
@@ -3490,13 +3554,13 @@ function pipDrawFocus(ctx, W, H, fg, bg){
   const fo = capFocus(), playing = pipPlaying(), now = performance.now();
   const F = Math.round(Math.max(36, Math.min(70, (prefs.get("capFSize") || 30) * 1.7))), Fs = Math.round(F * 0.56), pad = 32;
   const bold = prefs.get("capBold") !== false, hl = prefs.get("capHlWord") !== false, gray = prefs.get("capGray") !== false;
-  const sig = "F|" + (fo ? fo.key + "|" + fo.at + "|" + (fo.w || "") : "-") + "|" + playing + "|" + F + bold + hl + gray + fg + bg + (prefs.get("capCatch") !== false) + (prefs.get("capNext") !== false);
+  const sig = "F|" + (fo ? fo.key + "|" + fo.at + "|" + (fo.w || "") : "-") + "|" + playing + "|" + SLOW.on + capFont() + "|" + F + bold + hl + gray + fg + bg + (prefs.get("capCatch") !== false) + (prefs.get("capNext") !== false);
   if (fo && fo.key !== PIP.fkey) { PIP.fkey = fo.key; PIP.fat = now; }
   const catchup = prefs.get("capCatch") !== false && fo && fo.prev && now - (PIP.fat || 0) < 7000;
   const sig2 = sig + "|" + !!catchup;
   if (sig2 === PIP.sig && now - (PIP.drawn || 0) < 1000) return false;
   PIP.sig = sig2; PIP.drawn = now;
-  const font = (wt, px) => wt + " " + px + "px -apple-system, system-ui, 'Segoe UI', sans-serif";
+  const font = (wt, px) => wt + " " + px + "px " + CAP_FONTS[capFont()][1];
   ctx.globalAlpha = 1; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
   ctx.textBaseline = "top";
   if (!fo) {
@@ -3541,7 +3605,7 @@ function pipDrawFocus(ctx, W, H, fg, bg){
   // bottom: paused, progress through the page
   ctx.globalAlpha = .25; ctx.fillRect(pad, H - 14, W - pad * 2, 4);
   ctx.globalAlpha = .85; ctx.fillRect(pad, H - 14, Math.round((W - pad * 2) * Math.max(0, Math.min(1, fo.pct || 0))), 4);
-  if (!playing) { ctx.font = font(700, 22); ctx.globalAlpha = .8; ctx.textBaseline = "bottom"; ctx.fillText("PAUSED", pad, H - 22); }
+  if (!playing || SLOW.on) { ctx.font = font(700, 22); ctx.globalAlpha = .8; ctx.textBaseline = "bottom"; ctx.fillText(!playing ? "PAUSED" : "SLOWER", pad, H - 22); }
   ctx.globalAlpha = 1;
   pipSend();
   return false;
@@ -3599,6 +3663,14 @@ function capCmd(cmd, a = {}){
     if ((cmd === "bigger" || cmd === "smaller") && capMode() === "page") {
       prefs.set("capPSize", Math.max(12, Math.min(40, (prefs.get("capPSize") || 19) + (cmd === "bigger" ? 2 : -2)))); capSend(); return;
     }
+    if (cmd === "lost") { capLost(); return; }
+    if (cmd === "slow") { capSlow(); return; }
+    if (cmd.startsWith("font-")) { prefs.set("capFont", cmd.slice(5)); capSend(); if (S.sheet === "type") renderSheet(); return; }
+    if (cmd === "lock" && TAURI && capMode() === "focus") {
+      const on = !capLocked(); prefs.set("capFThru", on);
+      toast(on ? "Clicks now go through the pop-out to your game. To move it, tap Unlock pop-out in the player or under Aa." : "Pop-out unlocked: you can drag it and click it again.", null, 7000);
+      capSend(); if (S.sheet === "type") renderSheet(); if (S.dock) updateDock(); return;
+    }
     if (cmd === "lock") {
       const on = !prefs.get("capLock"); prefs.set("capLock", on);
       if (on) toast(TAURI ? "Pop-out locked. Clicks go through it now. To unlock, open the player or Aa in Pagekeeper and tap Unlock pop-out." : "Pop-out locked. Taps go through it now. To unlock, tap Unlock pop-out in the player or under Aa.", null, 8000);
@@ -3616,7 +3688,7 @@ const capMenuItems = () => {
   const p = capPayload();
   return [p.audio || p.speaking ? ["play", p.playing ? "Pause" : "Play"] : null, p.audio ? ["back", "Back a few seconds"] : null,
     ["mode-line", (p.mode === "line" ? "✓ " : "") + "One sentence"], ["mode-focus", (p.mode === "focus" ? "✓ " : "") + "Focus (for games)"], ["mode-page", (p.mode === "page" ? "✓ " : "") + "The whole page"],
-    ...(p.mode === "focus" ? [["plate-up", "Stronger backing"], ["plate-down", "Lighter backing"], ["hlword", (p.hlWord ? "✓ " : "") + "Mark the word being read"], ["catchup", (p.catchup ? "✓ " : "") + "Keep the last sentence"], ["shownext", (p.shownext ? "✓ " : "") + "Show what's next"], ["bold", (p.bold ? "✓ " : "") + "Bold text"]] : []),
+    ...(p.mode === "focus" ? [["plate-up", "Stronger backing"], ["plate-down", "Lighter backing"], ["hlword", (p.hlWord ? "✓ " : "") + "Mark the word being read"], ["catchup", (p.catchup ? "✓ " : "") + "Keep the last sentence"], ["shownext", (p.shownext ? "✓ " : "") + "Show what's next"], ["bold", (p.bold ? "✓ " : "") + "Bold text"], ["lost", "Lost my place"], ["slow", (p.slow ? "✓ " : "") + "Slow down for this sentence"], ...Object.entries(CAP_FONTS).map(([k, [l]]) => ["font-" + k, (capFont() === k ? "✓ " : "") + l + " font"])] : []),
     ...(p.mode === "page" ? [...Object.entries(CAP_SIZES).map(([k, [, , l]]) => ["size-" + k, (prefs.get("capPSz") || "tablet") === k ? "✓ " + l + " size" : l + " size"]), ["gray", (p.gray ? "✓ " : "") + "Gray until it's read"], ["pclear", (p.pclear ? "✓ " : "") + "No background"]] : []),
     ["bigger", "Bigger text"], ["smaller", "Smaller text"], p.mode !== "line" ? null : ["style", p.style === "clear" ? "Show a background" : "Just the text"],
     ["lock", (p.locked ? "✓ " : "") + "Lock in place (taps go through)"], ["autohide", (p.autohide ? "✓ " : "") + "Hide when paused"], ["info", (p.showInfo ? "✓ " : "") + "Show chapter and time left"],

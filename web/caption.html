@@ -119,7 +119,7 @@ body.gone #fo{opacity:0;transition:opacity .4s 1s}
     ["mode-line", "One sentence", last.mode === "line"],
     ["mode-focus", "Focus (for games)", last.mode === "focus"],
     ["mode-page", "The whole page", last.mode === "page"],
-    ...(last.mode === "focus" ? [["plate-up", "Stronger backing"], ["plate-down", "Lighter backing"], ["hlword", "Mark the word being read", last.hlWord !== false], ["catchup", "Keep the last sentence", last.catchup !== false], ["shownext", "Show what's next", last.shownext !== false], ["bold", "Bold text", last.bold !== false]] : []),
+    ...(last.mode === "focus" ? [["plate-up", "Stronger backing"], ["plate-down", "Lighter backing"], ["hlword", "Mark the word being read", last.hlWord !== false], ["catchup", "Keep the last sentence", last.catchup !== false], ["shownext", "Show what's next", last.shownext !== false], ["bold", "Bold text", last.bold !== false], ["lost", "Lost my place"], ["slow", "Slow down for this sentence", !!last.slow]] : []),
     ...(last.mode === "page" ? [["size-phone", "Phone size"], ["size-tablet", "Tablet size"], ["size-book", "Book page size"], ["size-wide", "Wide size"], ["gray", "Gray until it's read", last.gray !== false], ["pclear", "No background", last.pclear === true]] : []),
     null,
     ["bigger", "Bigger text"],
