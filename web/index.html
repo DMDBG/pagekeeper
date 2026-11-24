@@ -218,6 +218,12 @@ input.scrub:active::-webkit-slider-thumb{transform:scale(1.2)}
 #floatcap.page .fc-grip{z-index:2}
 #floatcap.page.pclear{background:transparent;box-shadow:none}
 #floatcap.page.pclear:hover{outline:1px dashed color-mix(in srgb,currentColor 40%,transparent)}
+#floatcap.focus{background:transparent;box-shadow:none;padding:0;border:0}
+#floatcap.focus .fc-grip{z-index:2}
+#floatcap.focus:hover{outline:1px dashed color-mix(in srgb,currentColor 35%,transparent);border-radius:14px}
+.capplate{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px}
+.capplate input{flex:1;accent-color:var(--accent)}
+.capplate b{min-width:3.2em;text-align:right;font-variant-numeric:tabular-nums}
 #fcMenu{position:fixed;z-index:60;min-width:190px;padding:5px;display:flex;flex-direction:column;background:var(--surface);color:var(--ink);border:1px solid var(--line,#3A4150);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.35);font:14px var(--ui)}
 #fcMenu button{all:unset;padding:8px 12px;border-radius:6px;cursor:pointer}
 #fcMenu button:hover,#fcMenu button:focus-visible{background:color-mix(in srgb,currentColor 12%,transparent)}

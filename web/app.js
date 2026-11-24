@@ -9,7 +9,8 @@ const MAX_FILE = 50 * 1024 * 1024;          // Supabase free plan's per-file lim
 const CHARS_PER_PAGE = 1500;                // fixed page length: same page numbers on every device
 const CFG = window.PK_CONFIG || {};
 const BUILD = window.PK_BUILD || { version: "dev", sha: "", date: "" };
-const WHATS_NEW = { id: "au-1", items: [
+const WHATS_NEW = { id: "focus-1", items: [
+  "<b>Focus pop-out, for reading over a game:</b> under <b>Aa → Pop-out shows</b>, pick <b>Focus</b>. One big sentence with a bright marker on the word being read, so your eyes find it the moment you look back. The last sentence stays above for a few seconds (tap it to hear it again), the next one waits below, and you set how strong the see-through backing is. Works in the PC pop-out, in Pagekeeper, and in the iPhone floating window.",
   "<b>New audiobook player on iPhone:</b> the book is now played by the app itself, like a video app. It keeps going during calls, in the background and on the lock screen.",
   "<b>Keeps playing during calls:</b> like a video app, the book keeps going while you're on a Discord, FaceTime or phone call, and picks itself back up if something else stops it. Pausing it yourself, or taking your headphones out, still pauses it.",
   "<b>No more stops between parts:</b> about 10 minutes before a part ends, the next part downloads by itself (if it's in your account and not on this device yet), so the book keeps playing straight through.",
@@ -1418,7 +1419,11 @@ function renderSheet(){
         <div class="seg"><button id="capToggle" aria-pressed="${capOn}">${capOn ? "Hide pop-out" : "Show pop-out"}</button></div>
         <span class="note">${TAURI ? "Floats on top of everything on your screen. Drag it anywhere; drag its edges to resize." : "Floats over Pagekeeper. Drag it around; drag its corner to resize."} It shows the sentence being read aloud, or the page you're on.</span></div>
       <div class="field"><label>Pop-out shows</label>
-        <div class="seg"><button data-capmode="line" aria-pressed="${capMode() === "line"}">One sentence</button><button data-capmode="page" aria-pressed="${capMode() === "page"}">The whole page</button></div>
+        <div class="seg"><button data-capmode="line" aria-pressed="${capMode() === "line"}">One sentence</button><button data-capmode="focus" aria-pressed="${capMode() === "focus"}">Focus</button><button data-capmode="page" aria-pressed="${capMode() === "page"}">The whole page</button></div>
+        ${capMode() === "focus" ? `<div class="capplate"><span>Backing</span><input type="range" id="capPlate" min="0" max="100" step="5" value="${Math.round(capPlate() * 100)}" aria-label="How strong the backing behind the text is"><b>${Math.round(capPlate() * 100)}%</b></div>
+        <div class="seg" style="margin-top:8px"><button data-capx="hlword" aria-pressed="${prefs.get("capHlWord") !== false}">Mark the word</button><button data-capx="catchup" aria-pressed="${prefs.get("capCatch") !== false}">Last sentence</button><button data-capx="shownext" aria-pressed="${prefs.get("capNext") !== false}">What's next</button></div>
+        <div class="seg" style="margin-top:8px"><button data-capx="bold" aria-pressed="${prefs.get("capBold") !== false}">Bold text</button><button data-capx="gray" aria-pressed="${prefs.get("capGray") !== false}">Dim unread words</button><button data-capx="smaller" aria-label="Smaller focus text">A−</button><button data-capx="bigger" aria-label="Larger focus text">A+</button></div>
+        <span class="note">Focus is made for reading over a game or video: one sentence, big, with a bright marker on the word being read so your eyes find it the moment you look back. The last sentence stays above for a few seconds (${TAURI ? "click" : "tap"} it to hear it again) and the next one waits below. Turn the backing up over busy, bright scenes.</span>` : ""}
         ${capMode() === "page" ? `<div class="seg" style="margin-top:8px">${Object.entries(CAP_SIZES).map(([k, [, , l]]) => `<button data-capsize="${k}" aria-pressed="${(prefs.get("capPSz") || "tablet") === k}">${l}</button>`).join("")}</div>
         <div class="seg" style="margin-top:8px"><button data-capx="gray" aria-pressed="${prefs.get("capGray") !== false}">Gray until it's read</button><button data-capx="pclear" aria-pressed="${prefs.get("capPClear") === true}">No background</button></div>` : ""}
         <span class="note">The whole page: words are gray until they're read, then come into color. ${TAURI ? "Double-click" : "Double-tap"} a word to move the audiobook or read-aloud to it. Drag it by its top bar${TAURI ? ", and drag its edges to resize" : ""}. For audiobooks, turn on Follow in the player.</span></div>
@@ -1449,7 +1454,8 @@ function renderSheet(){
         </div>
         <span class="note">Locked, ${TAURI ? "clicks" : "taps"} go straight through the pop-out to whatever is under it. Hide when paused shows it only while the audiobook or read-aloud is playing. You can also ${TAURI ? "right-click" : "press and hold"} the pop-out for these.</span></div>`);
     el.querySelectorAll("[data-capx]").forEach(b => b.onclick = () => { capCmd(b.dataset.capx); renderSheet(); });
-    el.querySelectorAll("[data-capmode]").forEach(b => b.onclick = () => { if (!prefs.get("capOn")) setCaption(true); setCapMode(b.dataset.capmode); });
+    el.querySelectorAll("[data-capmode]").forEach(b => b.onclick = () => { if (!prefs.get("capOn") && !(PIP && PIP.on)) setCaption(true); setCapMode(b.dataset.capmode); });
+    const cpl = $("#capPlate"); if (cpl) cpl.oninput = () => { prefs.set("capPlate", +cpl.value / 100); cpl.nextElementSibling.textContent = cpl.value + "%"; capSend(); };
     el.querySelectorAll("[data-capsize]").forEach(b => b.onclick = () => { if (!prefs.get("capOn")) setCaption(true); capCmd("size-" + b.dataset.capsize); });
     $("#capToggle").onclick = () => { setCaption(!prefs.get("capOn")); const rp = $("#rPop"); if (rp) rp.setAttribute("aria-pressed", !!prefs.get("capOn")); renderSheet(); };
     el.querySelectorAll("[data-capstyle]").forEach(b => b.onclick = () => { prefs.set("capStyle", b.dataset.capstyle); capSend(); renderSheet(); });
@@ -2667,7 +2673,7 @@ async function followTick(force){
   capNow.abook = S.cur; capNow.apage = S.page; capNow.apos = Math.max(0, Math.round(inPage));
   let n = 0, hit = null;
   for (const sp of document.querySelectorAll(".page [data-s]")) { n += sp.textContent.length; hit = sp; if (n > inPage) break; }
-  if (!hit || hit === fLast.el) { if (capMode() === "page") capSend(); return; }
+  if (!hit || hit === fLast.el) { if (capMode() !== "line") capSend(); return; }
   if (fLast.el) clearHighlight(fLast.el);
   fLast.el = hit;
   if ((prefs.get("hl") || "sentence") !== "off") {
@@ -3147,12 +3153,38 @@ function capPayload(){
     else if (c && c.kind === "pdf") hint = "Pop-out text works with EPUB and text books, or while a PDF is read aloud.";
   } else hint = "Open a book in Pagekeeper.";
   const playing = capNow.speaking || !!(auBook && !au.paused);
-  const page = capMode() === "page";
-  return { ...capCfg(), ...(page ? { size: prefs.get("capPSize") || 19, mode: "page", pg: capPage(), gray: prefs.get("capGray") !== false, pclear: prefs.get("capPClear") === true, canRead: S.view === "reader" && !!S.cur } : { mode: "line" }), text, hint, info: capInfo(), locked: !!prefs.get("capLock"), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
+  const page = capMode() === "page", focus = capMode() === "focus";
+  return { ...capCfg(), ...(page ? { size: prefs.get("capPSize") || 19, mode: "page", pg: capPage(), gray: prefs.get("capGray") !== false, pclear: prefs.get("capPClear") === true, canRead: S.view === "reader" && !!S.cur }
+    : focus ? { size: prefs.get("capFSize") || 30, mode: "focus", fo: capFocus(), plate: capPlate(), bold: prefs.get("capBold") !== false, gray: prefs.get("capGray") !== false,
+        hlWord: prefs.get("capHlWord") !== false, catchup: prefs.get("capCatch") !== false, shownext: prefs.get("capNext") !== false, canRead: S.view === "reader" && !!S.cur }
+    : { mode: "line" }), text, hint, info: capInfo(), locked: !!prefs.get("capLock"), autohide: !!prefs.get("capHide"), hidden: !!prefs.get("capHide") && !playing, showInfo: prefs.get("capInfo") !== false, word: capNow.speaking && (prefs.get("hl") === "word") ? capNow.word : null, speaking: capNow.speaking, playing, audio: !!auBook };
 }
 /* The whole page in the pop-out: its sentences, and how far into the page the audio or read-aloud is
    (-1: not known, so it's all in color). */
-const capMode = () => prefs.get("capMode") === "page" ? "page" : "line";
+const capMode = () => { const m = prefs.get("capMode"); return m === "page" || m === "focus" ? m : "line"; };
+const capPlate = () => { const v = prefs.get("capPlate"); return typeof v === "number" ? v : 0.7; };
+/* Focus: the sentence being read, where in it the reading is, the word to mark, and the sentences
+   either side (for the catch-up line above and the next one below). */
+function capFocus(){
+  const pg = capPage();
+  if (!pg) {
+    const t = capNow.text; if (!t) return null;
+    const w = capNow.speaking && capNow.word ? [capNow.word[0], capNow.word[0] + capNow.word[1]] : null;
+    return { key: "t|" + t, cur: t, at: w ? w[0] : -1, w, prev: "", prevOff: null, next: "", pct: 0 };
+  }
+  const list = []; let o = 0;
+  for (const [, ss] of pg.blocks) for (const q of ss) { if (q.trim()) list.push([o, q]); o += q.length; }
+  if (!list.length) return null;
+  let i = 0;
+  if (pg.pos >= 0) { i = list.findIndex(([st, q]) => pg.pos < st + q.length); if (i < 0) i = list.length - 1; }
+  else if (capNow.text && capNow.book === S.cur && capNow.page === S.page) { const k = list.findIndex(([, q]) => q.trim() === capNow.text); if (k >= 0) i = k; }
+  const [st, q] = list[i], cur = q.trim(), lead = q.length - q.trimStart().length;
+  const at = pg.pos >= 0 ? Math.max(0, Math.min(cur.length, pg.pos - st - lead)) : -1;
+  let w = null;
+  if (at >= 0) { const re = /\S+/g; let m; while ((m = re.exec(cur))) if (m.index + m[0].length > at) { w = [m.index, m.index + m[0].length]; break; } }
+  return { key: pg.key + "|" + i, cur, at, w, prev: i > 0 ? list[i - 1][1].trim() : "", prevOff: i > 0 ? list[i - 1][0] : null,
+    next: i + 1 < list.length ? list[i + 1][1].trim() : "", pct: pg.total ? Math.max(0, pg.pos) / pg.total : 0, pkey: pg.key };
+}
 const CAP_SIZES = { phone: [390, 720, "Phone"], tablet: [640, 860, "Tablet"], book: [540, 760, "Book page"], wide: [940, 560, "Wide"] };
 function capPage(){
   if (S.view !== "reader" || !S.cur) return null;
@@ -3183,7 +3215,9 @@ function capResize(w, h){
 }
 function setCapMode(m){
   prefs.set("capMode", m); capSend();
-  if (m === "page") capResize(...CAP_SIZES[prefs.get("capPSz") || "tablet"]); else capResize(TAURI ? 560 : 520, TAURI ? 150 : 130);
+  if (m === "page") capResize(...CAP_SIZES[prefs.get("capPSz") || "tablet"]);
+  else if (m === "focus") capResize(TAURI ? 640 : 380, TAURI ? 280 : 230);
+  else capResize(TAURI ? 560 : 520, TAURI ? 150 : 130);
   if (S.sheet === "type") renderSheet();
 }
 // Turn the page from the pop-out (the audio keeps going where it is).
@@ -3258,7 +3292,7 @@ function capSend(){
 }
 function setCaption(on){
   prefs.set("capOn", !!on);
-  if (TAURI) TAURI.core.invoke("pk_caption", { show: !!on }).then(() => { if (on && capMode() === "page") capResize(...CAP_SIZES[prefs.get("capPSz") || "tablet"]); }).catch(e => toast("Couldn't open the pop-out: " + esc(String(e))));
+  if (TAURI) TAURI.core.invoke("pk_caption", { show: !!on }).then(() => { if (on && capMode() === "page") capResize(...CAP_SIZES[prefs.get("capPSz") || "tablet"]); else if (on && capMode() === "focus") capResize(640, 280); }).catch(e => toast("Couldn't open the pop-out: " + esc(String(e))));
   else if (!on) { const f = $("#floatcap"); if (f) f.remove(); }
   capSend();
 }
@@ -3388,6 +3422,7 @@ function pipDraw(){
   const ctx = PIP.ctx; if (!ctx) return;
   const W = PIP.W, H = PIP.H, pad = 34, F = 40, cfg = capCfg();
   const fg = cfg.fg || CAP_DEFAULT.fg, bg = (cfg.bg && cfg.bg !== "transparent") ? cfg.bg : CAP_DEFAULT.bg;
+  if (capMode() === "focus") return pipDrawFocus(ctx, W, H, fg, bg);
   const pg = capPage();
   let paras, pos = -1, key;
   if (pg) { paras = pg.blocks.map(([h, ss]) => ({ h, t: ss.join("") })); pos = pg.pos; key = pg.key; }
@@ -3440,6 +3475,77 @@ function pipDraw(){
   pipSend();
   return moving;
 }
+/* Focus in the floating window: the sentence being read, big, with the word being read marked;
+   the last sentence small above, the next one small below, and a thin progress line. */
+function pipWrap(ctx, text, maxW){
+  const out = []; let line = "", ls = 0, o = 0;
+  for (const w of text.match(/\S+\s*/g) || []) {
+    if (line && ctx.measureText((line + w).trimEnd()).width > maxW) { out.push({ s: ls, str: line }); line = ""; ls = o; }
+    line += w; o += w.length;
+  }
+  if (line) out.push({ s: ls, str: line });
+  return out;
+}
+function pipDrawFocus(ctx, W, H, fg, bg){
+  const fo = capFocus(), playing = pipPlaying(), now = performance.now();
+  const F = Math.round(Math.max(36, Math.min(70, (prefs.get("capFSize") || 30) * 1.7))), Fs = Math.round(F * 0.56), pad = 32;
+  const bold = prefs.get("capBold") !== false, hl = prefs.get("capHlWord") !== false, gray = prefs.get("capGray") !== false;
+  const sig = "F|" + (fo ? fo.key + "|" + fo.at + "|" + (fo.w || "") : "-") + "|" + playing + "|" + F + bold + hl + gray + fg + bg + (prefs.get("capCatch") !== false) + (prefs.get("capNext") !== false);
+  if (fo && fo.key !== PIP.fkey) { PIP.fkey = fo.key; PIP.fat = now; }
+  const catchup = prefs.get("capCatch") !== false && fo && fo.prev && now - (PIP.fat || 0) < 7000;
+  const sig2 = sig + "|" + !!catchup;
+  if (sig2 === PIP.sig && now - (PIP.drawn || 0) < 1000) return false;
+  PIP.sig = sig2; PIP.drawn = now;
+  const font = (wt, px) => wt + " " + px + "px -apple-system, system-ui, 'Segoe UI', sans-serif";
+  ctx.globalAlpha = 1; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.textBaseline = "top";
+  if (!fo) {
+    ctx.font = font(500, 30); ctx.fillStyle = fg; ctx.globalAlpha = .75;
+    ctx.fillText("Open a book in Pagekeeper.", pad, H / 2 - 15); ctx.globalAlpha = 1; pipSend(); return false;
+  }
+  const maxW = W - pad * 2, L = Math.round(F * 1.3), Ls = Math.round(Fs * 1.3);
+  ctx.font = font(bold ? 700 : 500, F);
+  let lines = pipWrap(ctx, fo.cur, maxW);
+  // keep the word being read on screen in a long sentence: show at most 4 lines around it
+  const maxLines = 4;
+  if (lines.length > maxLines && fo.w) { let k = lines.findIndex((l, i) => i === lines.length - 1 || lines[i + 1].s > fo.w[0]); k = Math.max(0, Math.min(lines.length - maxLines, k - 1)); lines = lines.slice(k, k + maxLines); }
+  else if (lines.length > maxLines) lines = lines.slice(0, maxLines);
+  ctx.font = font(500, Fs);
+  const prevL = catchup ? pipWrap(ctx, fo.prev, maxW).slice(-2) : [];
+  const nextL = prefs.get("capNext") !== false && fo.next ? pipWrap(ctx, fo.next, maxW).slice(0, 1) : [];
+  const blockH = prevL.length * Ls + (prevL.length ? 14 : 0) + lines.length * L + (nextL.length ? 14 + nextL.length * Ls : 0);
+  let y = Math.max(16, Math.round((H - 30 - blockH) / 2));
+  ctx.fillStyle = fg;
+  ctx.globalAlpha = .45; for (const l of prevL) { ctx.fillText(l.str.trimEnd(), pad, y); y += Ls; } if (prevL.length) y += 14;
+  ctx.font = font(bold ? 700 : 500, F);
+  const at = fo.at ?? -1, w = hl ? fo.w : null;
+  for (const l of lines) {
+    let x = pad;
+    for (const m of l.str.matchAll(/\S+\s*/g)) {
+      const s0 = l.s + m.index, word = m[0], wd = ctx.measureText(word.trimEnd()).width;
+      if (w && s0 === w[0]) {
+        ctx.globalAlpha = 1; ctx.fillStyle = "#FFD54A";
+        const r = 8, hx = x - 6, hy = y - 4, hw = wd + 12, hh = F + 10;
+        ctx.beginPath(); ctx.moveTo(hx + r, hy); ctx.arcTo(hx + hw, hy, hx + hw, hy + hh, r); ctx.arcTo(hx + hw, hy + hh, hx, hy + hh, r); ctx.arcTo(hx, hy + hh, hx, hy, r); ctx.arcTo(hx, hy, hx + hw, hy, r); ctx.fill();
+        ctx.fillStyle = "#141414"; ctx.fillText(word.trimEnd(), x, y); ctx.fillStyle = fg;
+      } else {
+        ctx.globalAlpha = at < 0 || s0 + word.trimEnd().length <= at || !gray ? 1 : .5;
+        ctx.fillText(word.trimEnd(), x, y);
+      }
+      x += ctx.measureText(word).width;
+    }
+    y += L;
+  }
+  ctx.font = font(500, Fs);
+  if (nextL.length) { y += 14; ctx.globalAlpha = .32; for (const l of nextL) { ctx.fillText(l.str.trimEnd() + (fo.next.length > l.str.length ? "…" : ""), pad, y); y += Ls; } }
+  // bottom: paused, progress through the page
+  ctx.globalAlpha = .25; ctx.fillRect(pad, H - 14, W - pad * 2, 4);
+  ctx.globalAlpha = .85; ctx.fillRect(pad, H - 14, Math.round((W - pad * 2) * Math.max(0, Math.min(1, fo.pct || 0))), 4);
+  if (!playing) { ctx.font = font(700, 22); ctx.globalAlpha = .8; ctx.textBaseline = "bottom"; ctx.fillText("PAUSED", pad, H - 22); }
+  ctx.globalAlpha = 1;
+  pipSend();
+  return false;
+}
 function pipAlpha(c, a){
   const m = /^#([0-9a-f]{6})$/i.exec(c || ""); if (!m) return "rgba(17,19,24," + a + ")";
   const n = parseInt(m[1], 16); return "rgba(" + (n >> 16) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
@@ -3474,7 +3580,14 @@ function capCmd(cmd, a = {}){
     if (cmd === "fwd") { if (auBook) skipBy(skipSec()); else if (S.reading) ttsJumpTo(TTS.idx + 1); return; }
     if (cmd === "seek") { capSeek(a); return; }
     if (cmd === "prevpage" || cmd === "nextpage") { capTurn(cmd === "nextpage" ? 1 : -1); return; }
-    if (cmd === "mode") { setCapMode(capMode() === "page" ? "line" : "page"); return; }
+    if (cmd === "mode") { setCapMode({ line: "focus", focus: "page", page: "line" }[capMode()]); return; }
+    if (cmd.startsWith("mode-")) { setCapMode(cmd.slice(5)); return; }
+    if (cmd === "plate-up" || cmd === "plate-down") { prefs.set("capPlate", Math.round(Math.max(0, Math.min(1, capPlate() + (cmd === "plate-up" ? 0.15 : -0.15))) * 100) / 100); capSend(); if (S.sheet === "type") renderSheet(); return; }
+    const flip = { bold: "capBold", hlword: "capHlWord", catchup: "capCatch", shownext: "capNext" }[cmd];
+    if (flip) { prefs.set(flip, prefs.get(flip) === false); capSend(); if (S.sheet === "type") renderSheet(); return; }
+    if ((cmd === "bigger" || cmd === "smaller") && capMode() === "focus") {
+      prefs.set("capFSize", Math.max(16, Math.min(60, (prefs.get("capFSize") || 30) + (cmd === "bigger" ? 2 : -2)))); capSend(); return;
+    }
     if (cmd.startsWith("size-")) {
       const k = cmd.slice(5); if (!CAP_SIZES[k]) return;
       prefs.set("capPSz", k);
@@ -3502,9 +3615,10 @@ function capCmd(cmd, a = {}){
 const capMenuItems = () => {
   const p = capPayload();
   return [p.audio || p.speaking ? ["play", p.playing ? "Pause" : "Play"] : null, p.audio ? ["back", "Back a few seconds"] : null,
-    ["mode", p.mode === "page" ? "Show one sentence" : "Show the whole page"],
+    ["mode-line", (p.mode === "line" ? "✓ " : "") + "One sentence"], ["mode-focus", (p.mode === "focus" ? "✓ " : "") + "Focus (for games)"], ["mode-page", (p.mode === "page" ? "✓ " : "") + "The whole page"],
+    ...(p.mode === "focus" ? [["plate-up", "Stronger backing"], ["plate-down", "Lighter backing"], ["hlword", (p.hlWord ? "✓ " : "") + "Mark the word being read"], ["catchup", (p.catchup ? "✓ " : "") + "Keep the last sentence"], ["shownext", (p.shownext ? "✓ " : "") + "Show what's next"], ["bold", (p.bold ? "✓ " : "") + "Bold text"]] : []),
     ...(p.mode === "page" ? [...Object.entries(CAP_SIZES).map(([k, [, , l]]) => ["size-" + k, (prefs.get("capPSz") || "tablet") === k ? "✓ " + l + " size" : l + " size"]), ["gray", (p.gray ? "✓ " : "") + "Gray until it's read"], ["pclear", (p.pclear ? "✓ " : "") + "No background"]] : []),
-    ["bigger", "Bigger text"], ["smaller", "Smaller text"], p.mode === "page" ? null : ["style", p.style === "clear" ? "Show a background" : "Just the text"],
+    ["bigger", "Bigger text"], ["smaller", "Smaller text"], p.mode !== "line" ? null : ["style", p.style === "clear" ? "Show a background" : "Just the text"],
     ["lock", (p.locked ? "✓ " : "") + "Lock in place (taps go through)"], ["autohide", (p.autohide ? "✓ " : "") + "Hide when paused"], ["info", (p.showInfo ? "✓ " : "") + "Show chapter and time left"],
     ["close", "Close pop-out"]].filter(Boolean);
 };
@@ -3525,14 +3639,18 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && $("#fcMenu
 /* In-app floating panel (iPhone and browser). */
 function renderFloatCap(p){
   let f = $("#floatcap");
-  const pageMode = p.mode === "page" && !!window.PKPage;
-  if (f && f.classList.contains("page") !== pageMode) { f.remove(); f = null; }
+  const pageMode = p.mode === "page" && !!window.PKPage, focusMode = p.mode === "focus" && !!window.PKFocus;
+  if (f && (f.classList.contains("page") !== pageMode || f.classList.contains("focus") !== focusMode)) { f.remove(); f = null; }
   if (!f) {
     f = document.createElement("div"); f.id = "floatcap";
     const pos = prefs.get("capPos") || { x: 16, y: 90 };
     f.style.left = pos.x + "px"; f.style.top = pos.y + "px";
     const sz = prefs.get("capBox"); if (sz) { f.style.width = Math.min(sz.w, innerWidth - 16) + "px"; f.style.height = Math.min(sz.h, innerHeight - 24) + "px"; }
-    if (pageMode) {
+    if (focusMode) {
+      f.classList.add("focus");
+      f.innerHTML = `<span class="fc-grip" aria-hidden="true"></span>`;
+      f._pf = PKFocus.mount(f, { onCmd: (c, a) => capCmd(c, a) });
+    } else if (pageMode) {
       f.classList.add("page");
       f.innerHTML = `<span class="fc-grip" aria-hidden="true"></span>`;
       f._pp = PKPage.mount(f, { onCmd: (c, a) => capCmd(c, a) });
@@ -3548,6 +3666,7 @@ function renderFloatCap(p){
       if (e.button === 2) return;
       // the whole page: drag by its top bar (or resize by the corner); the text scrolls and takes double-taps
       if (f.classList.contains("page") && (!e.target.closest(".pp-bar, .fc-grip") || e.target.closest("button"))) return;
+      if (e.target.closest(".pf-prev")) return;   // Focus: tapping the last sentence plays it again
       clearTimeout(hold);
       if (e.pointerType !== "mouse") hold = setTimeout(() => { drag = null; floatCapMenu(e.clientX, e.clientY); }, 600);
       const r = f.getBoundingClientRect();
@@ -3575,12 +3694,13 @@ function renderFloatCap(p){
   }
   f.style.setProperty("--fg", p.fg); f.style.setProperty("--bg", p.bg); f.style.setProperty("--size", p.size + "px");
   f.classList.toggle("speaking", !!p.speaking);
-  f.classList.toggle("clear", !pageMode && p.style === "clear");
-  f.classList.toggle("auto", !pageMode && !!p.auto);
+  f.classList.toggle("clear", !pageMode && !focusMode && p.style === "clear");
+  f.classList.toggle("auto", !pageMode && !focusMode && !!p.auto);
   f.classList.toggle("locked", !!p.locked);
   f.classList.toggle("gone", !!p.hidden);
   f.classList.toggle("pclear", pageMode && p.pclear === true);
   if (pageMode) { f._pp.update(p); return; }
+  if (focusMode) { f._pf.update(p); return; }
   const inf = f.querySelector(".fc-info"); inf.textContent = p.info || ""; inf.hidden = !p.info;
   const box = f.querySelector(".fc-text");
   if (!p.text) box.innerHTML = `<span class="fc-hint">${esc(p.hint || "")}</span>`;

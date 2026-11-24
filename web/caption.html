@@ -40,24 +40,42 @@ body.pagemode.pclear:hover{box-shadow:inset 0 0 0 1px rgba(127,127,127,.45)}
 body.pagemode #t,body.pagemode #info{display:none}
 body.pagemode #pg{display:block;position:fixed;inset:0}
 body.gone #pg{opacity:0;transition:opacity .4s 1s}
+/* Focus (pagecap.js): one big sentence on a see-through backing; drag it anywhere */
+#fo{display:none}
+body.focusmode{background:transparent!important}
+body.focusmode #t,body.focusmode #info{display:none}
+body.focusmode #fo{display:block;position:fixed;inset:0}
+body.focusmode:hover{box-shadow:inset 0 0 0 1px rgba(127,127,127,.35);border-radius:14px}
+body.gone #fo{opacity:0;transition:opacity .4s 1s}
 </style>
 </head>
 <body class="clear" data-tauri-drag-region>
 <div id="t" data-tauri-drag-region><div class="hint" data-tauri-drag-region>Open a book in Pagekeeper.</div></div>
 <div id="info" data-tauri-drag-region hidden></div>
 <div id="pg"></div>
+<div id="fo" data-tauri-drag-region></div>
 <script src="pagecap.js"></script>
 <script>
 (() => {
   const T = window.__TAURI__;
   const box = document.getElementById("t");
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  let pp = null;
+  let pp = null, pf = null;
   function show(p){
     const r = document.documentElement.style;
     r.setProperty("--fg", p.fg); r.setProperty("--bg", p.bg); r.setProperty("--size", p.size + "px");
-    const page = p.mode === "page" && !!window.PKPage;
+    const page = p.mode === "page" && !!window.PKPage, focus = p.mode === "focus" && !!window.PKFocus;
     document.body.classList.toggle("pagemode", page);
+    document.body.classList.toggle("focusmode", focus);
+    if (focus) {
+      if (!pf) pf = PKFocus.mount(document.getElementById("fo"), { onCmd: (c, a) => cmd(c, a), drag: true });
+      document.body.classList.remove("clear", "solid", "pclear");
+      pf.update(p);
+      document.body.classList.toggle("gone", !!p.hidden);
+      document.body.classList.toggle("locked", !!p.locked);
+      setThrough(!!p.locked || !!p.hidden);
+      return;
+    }
     if (page) {
       if (!pp) pp = PKPage.mount(document.getElementById("pg"), { onCmd: (c, a) => cmd(c, a), drag: true });
       document.body.classList.remove("clear", "solid");
@@ -98,12 +116,15 @@ body.gone #pg{opacity:0;transition:opacity .4s 1s}
     last.audio || last.speaking ? ["play", last.playing ? "Pause" : "Play"] : null,
     last.audio ? ["back", "Back a few seconds"] : null,
     null,
-    ["mode", last.mode === "page" ? "Show one sentence" : "Show the whole page"],
+    ["mode-line", "One sentence", last.mode === "line"],
+    ["mode-focus", "Focus (for games)", last.mode === "focus"],
+    ["mode-page", "The whole page", last.mode === "page"],
+    ...(last.mode === "focus" ? [["plate-up", "Stronger backing"], ["plate-down", "Lighter backing"], ["hlword", "Mark the word being read", last.hlWord !== false], ["catchup", "Keep the last sentence", last.catchup !== false], ["shownext", "Show what's next", last.shownext !== false], ["bold", "Bold text", last.bold !== false]] : []),
     ...(last.mode === "page" ? [["size-phone", "Phone size"], ["size-tablet", "Tablet size"], ["size-book", "Book page size"], ["size-wide", "Wide size"], ["gray", "Gray until it's read", last.gray !== false], ["pclear", "No background", last.pclear === true]] : []),
     null,
     ["bigger", "Bigger text"],
     ["smaller", "Smaller text"],
-    last.mode === "page" ? null : ["style", last.style === "clear" ? "Show a background" : "Just the text (see-through)"],
+    last.mode !== "line" ? null : ["style", last.style === "clear" ? "Show a background" : "Just the text (see-through)"],
     null,
     ["lock", "Lock in place (clicks go through)", !!last.locked],
     ["autohide", "Hide when paused", !!last.autohide],

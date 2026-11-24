@@ -181,4 +181,83 @@
     };
   }
   window.PKPage = { mount };
+
+  /* Focus: made for reading over a game or video. One sentence, big, on a see-through backing you set;
+     the word being read has a bright marker so your eyes land on it straight away when you look back;
+     the last sentence stays above for a moment (tap it to hear it again), the next one waits below. */
+  const FCSS = `
+.pf{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:.45em;padding:12px 18px 28px;box-sizing:border-box;overflow:hidden;color:var(--fg);border-radius:14px;
+  background:color-mix(in srgb,var(--bg) calc(var(--plate,.7) * 100%),transparent);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;user-select:none;-webkit-user-select:none}
+.pf-prev,.pf-next{font-size:calc(var(--fsize,30px) * .55);line-height:1.35;max-width:44ch;flex:none;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.pf-prev{opacity:.5;transition:opacity .8s;cursor:pointer}
+.pf-prev:hover{opacity:.8}
+.pf-prev.old{opacity:0;pointer-events:none}
+.pf-next{opacity:.32}
+.pf-cur{font-size:var(--fsize,30px);line-height:1.38;max-width:var(--measure,34ch);font-weight:var(--wt,650);flex:0 1 auto;min-height:0;overflow:hidden}
+.pf.gray .pf-cur .u{opacity:.5}
+.pf-cur mark{background:var(--hl,#FFD54A)!important;color:#141414!important;border-radius:.22em;padding:0 .14em;margin:0 -.14em;-webkit-box-decoration-break:clone;box-decoration-break:clone;text-shadow:none}
+.pf.enter .pf-cur{animation:pfIn .22s ease-out}
+@keyframes pfIn{from{opacity:0;transform:translateY(.25em)}to{opacity:1;transform:none}}
+.pf.outline .pf-prev,.pf.outline .pf-cur,.pf.outline .pf-next{--o:var(--bg);text-shadow:0 0 3px var(--o),1.5px 1.5px 0 var(--o),-1.5px -1.5px 0 var(--o),1.5px -1.5px 0 var(--o),-1.5px 1.5px 0 var(--o)}
+.pf-foot{position:absolute;left:14px;right:14px;bottom:6px;display:flex;align-items:center;gap:8px;font-size:11px;opacity:.65}
+.pf-prog{flex:1;height:3px;border-radius:2px;background:color-mix(in srgb,var(--fg) 20%,transparent);overflow:hidden}
+.pf-prog i{display:block;height:100%;background:var(--fg)}
+.pf-paused{font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.pf .hint{font-size:15px;opacity:.75}`;
+  let fstyled = false;
+  function mountFocus(host, opts = {}){
+    if (!fstyled) { const st = document.createElement("style"); st.textContent = FCSS; document.head.append(st); fstyled = true; }
+    const onCmd = opts.onCmd || (() => {});
+    const dr = opts.drag ? " data-tauri-drag-region" : "";
+    const root = document.createElement("div"); root.className = "pf";
+    if (opts.drag) root.setAttribute("data-tauri-drag-region", "");
+    root.innerHTML = `<div class="pf-prev"${opts.drag ? "" : ""}></div><div class="pf-cur"${dr}></div><div class="pf-next"${dr}></div><div class="pf-foot"${dr}><span class="pf-paused"${dr}></span><span class="pf-info"${dr}></span><span class="pf-prog"${dr}><i${dr}></i></span></div>`;
+    host.append(root);
+    const prev = root.querySelector(".pf-prev"), cur = root.querySelector(".pf-cur"), next = root.querySelector(".pf-next");
+    let key = null, oldTimer = 0, fo = null;
+    // tap the last sentence: hear it again
+    prev.addEventListener("click", e => { e.stopPropagation(); if (fo && fo.prevOff != null) onCmd("seek", { off: fo.prevOff, key: fo.pkey }); });
+    return {
+      root,
+      update(p){
+        fo = p.fo || null;
+        const st = root.style;
+        st.setProperty("--fsize", (p.size || 30) + "px");
+        st.setProperty("--plate", String(p.plate ?? .7));
+        st.setProperty("--wt", p.bold === false ? "450" : "650");
+        root.classList.toggle("gray", p.gray !== false);
+        root.classList.toggle("outline", (p.plate ?? .7) < .4);
+        const foot = root.querySelector(".pf-foot");
+        root.querySelector(".pf-paused").textContent = (p.audio || p.speaking || p.canRead) && !p.playing ? "Paused" : "";
+        root.querySelector(".pf-info").textContent = p.showInfo === false ? "" : (p.info || "");
+        if (!fo) { key = null; prev.textContent = next.textContent = ""; cur.innerHTML = `<span class="hint">${esc(p.hint || "Open a book in Pagekeeper.")}</span>`; foot.querySelector("i").style.width = "0"; return; }
+        const changed = fo.key !== key;
+        if (changed) {
+          key = fo.key;
+          prev.classList.remove("old"); clearTimeout(oldTimer);
+          oldTimer = setTimeout(() => prev.classList.add("old"), 7000);   // the catch-up line fades after a while
+          root.classList.remove("enter"); void root.offsetWidth; root.classList.add("enter");
+        }
+        prev.textContent = p.catchup === false ? "" : (fo.prev || "");
+        prev.title = fo.prevOff != null ? "Tap to hear this again" : "";
+        next.textContent = p.shownext === false ? "" : (fo.next || "");
+        const t = fo.cur || "", at = fo.at ?? -1, w = p.hlWord === false ? null : fo.w;
+        let html;
+        if (at < 0) html = esc(t);
+        else if (w) html = esc(t.slice(0, w[0])) + `<mark${dr}>${esc(t.slice(w[0], w[1]))}</mark><span class="u"${dr}>${esc(t.slice(w[1]))}</span>`;
+        else html = esc(t.slice(0, at)) + `<span class="u"${dr}>${esc(t.slice(at))}</span>`;
+        if (cur._h !== html) { cur._h = html; cur.innerHTML = html; }
+        // not enough room: drop the next sentence first, then the catch-up line, so the main one fits
+        next.style.display = prev.style.display = "";
+        if (cur.scrollHeight > cur.clientHeight + 2) next.style.display = "none";
+        if (cur.scrollHeight > cur.clientHeight + 2) prev.style.display = "none";
+        // a long sentence: keep the word being read in view
+        const m = cur.querySelector("mark");
+        if (m && cur.scrollHeight > cur.clientHeight + 2) cur.scrollTop = Math.max(0, m.offsetTop - cur.offsetTop - cur.clientHeight / 3);
+        else if (changed) cur.scrollTop = 0;
+        foot.querySelector("i").style.width = Math.round(Math.max(0, Math.min(1, fo.pct || 0)) * 100) + "%";
+      },
+    };
+  }
+  window.PKFocus = { mount: mountFocus };
 })();
